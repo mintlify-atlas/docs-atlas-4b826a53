@@ -1,0 +1,319 @@
+---
+title: Unified buffer
+description: Central memory buffer for weights, activations, gradients, and intermediate values
+---
+
+The unified buffer is the central memory module that stores all data used by the TPU: weights, activations, biases, ground truth labels, cached activations, and gradients. It provides multiple read/write ports with support for matrix transposition and gradient descent updates.
+
+## Module declaration
+
+```systemverilog
+module unified_buffer #(
+    parameter int UNIFIED_BUFFER_WIDTH = 128,
+    parameter int SYSTOLIC_ARRAY_WIDTH = 2
+)(
+    input logic clk,
+    input logic rst,
+    // Write ports from VPU
+    input logic [15:0] ub_wr_data_in [SYSTOLIC_ARRAY_WIDTH],
+    input logic ub_wr_valid_in [SYSTOLIC_ARRAY_WIDTH],
+    // Write ports from host
+    input logic [15:0] ub_wr_host_data_in [SYSTOLIC_ARRAY_WIDTH],
+    input logic ub_wr_host_valid_in [SYSTOLIC_ARRAY_WIDTH],
+    // Read control
+    input logic ub_rd_start_in,
+    input logic ub_rd_transpose,
+    input logic [8:0] ub_ptr_select,
+    input logic [15:0] ub_rd_addr_in,
+    input logic [15:0] ub_rd_row_size,
+    input logic [15:0] ub_rd_col_size,
+    // Learning rate
+    input logic [15:0] learning_rate_in,
+    // Multiple read output ports (see below)
+    // ...
+);
+```
+
+## Parameters
+
+<ParamField path="UNIFIED_BUFFER_WIDTH" type="int" default="128">
+  Total memory capacity in 16-bit words
+</ParamField>
+
+<ParamField path="SYSTOLIC_ARRAY_WIDTH" type="int" default="2">
+  Number of parallel read/write channels (matches systolic array width)
+</ParamField>
+
+## Memory organization
+
+The unified buffer is a single-ported memory array:
+
+```systemverilog
+logic [15:0] ub_memory [0:UNIFIED_BUFFER_WIDTH-1];
+```
+
+Data is stored in **row-major format**. For a 2-column matrix, consecutive elements are stored at sequential addresses.
+
+## Write ports
+
+### VPU write port
+
+Writes from the Vector Processing Unit (gradients, activations):
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_wr_data_in` | `[15:0] [SYSTOLIC_ARRAY_WIDTH]` | Data to write from VPU |
+| `ub_wr_valid_in` | `[SYSTOLIC_ARRAY_WIDTH]` | Valid signals for each channel |
+
+### Host write port
+
+Writes from external host (initial weights, biases, labels):
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_wr_host_data_in` | `[15:0] [SYSTOLIC_ARRAY_WIDTH]` | Data to write from host |
+| `ub_wr_host_valid_in` | `[SYSTOLIC_ARRAY_WIDTH]` | Valid signals for each channel |
+
+### Write behavior
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv:344-352:
+
+```systemverilog
+for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+    if (ub_wr_valid_in[i]) begin
+        ub_memory[wr_ptr] <= ub_wr_data_in[i];
+        wr_ptr = wr_ptr + 1;
+    end else if (ub_wr_host_valid_in[i]) begin
+        ub_memory[wr_ptr] <= ub_wr_host_data_in[i];
+        wr_ptr = wr_ptr + 1;
+    end
+end
+```
+
+Note: The loop decrements to maintain row-major ordering.
+
+## Read control
+
+### Read instruction inputs
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_rd_start_in` | 1 | Start a read operation |
+| `ub_rd_transpose` | 1 | Read matrix in transposed order |
+| `ub_ptr_select` | `[8:0]` | Select which read port to activate (0-6) |
+| `ub_rd_addr_in` | `[15:0]` | Starting address for read |
+| `ub_rd_row_size` | `[15:0]` | Number of rows to read |
+| `ub_rd_col_size` | `[15:0]` | Number of columns to read |
+
+### Pointer selection
+
+The `ub_ptr_select` signal activates different read ports:
+
+| Value | Read Port | Destination | Description |
+|-------|-----------|-------------|-------------|
+| 0 | Input | Systolic array (left edge) | Activation inputs |
+| 1 | Weight | Systolic array (top edge) | Weight values |
+| 2 | Bias | VPU bias modules | Bias scalars |
+| 3 | Y | VPU loss modules | Ground truth labels |
+| 4 | H | VPU leaky ReLU derivative | Cached activations |
+| 5 | Grad bias | Gradient descent modules | Bias gradients for update |
+| 6 | Grad weight | Gradient descent modules | Weight gradients for update |
+
+## Read output ports
+
+### To systolic array
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_rd_input_data_out_0/1` | `[15:0]` | Input activations for systolic array rows |
+| `ub_rd_input_valid_out_0/1` | 1 | Valid signals |
+| `ub_rd_weight_data_out_0/1` | `[15:0]` | Weights for systolic array columns |
+| `ub_rd_weight_valid_out_0/1` | 1 | Valid signals |
+| `ub_rd_col_size_out` | `[15:0]` | Number of active columns (for PE enable) |
+| `ub_rd_col_size_valid_out` | 1 | Valid signal |
+
+### To VPU
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_rd_bias_data_out_0/1` | `[15:0]` | Bias values |
+| `ub_rd_Y_data_out_0/1` | `[15:0]` | Ground truth labels for loss |
+| `ub_rd_H_data_out_0/1` | `[15:0]` | Cached activation values |
+
+## Matrix transpose support
+
+When `ub_rd_transpose` is asserted, the buffer reads data in column-major order:
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv:176-182:
+
+```systemverilog
+if(ub_rd_transpose) begin   // Switch columns and rows!
+    rd_input_row_size = ub_rd_col_size;
+    rd_input_col_size = ub_rd_row_size;
+end else begin
+    rd_input_row_size = ub_rd_row_size;
+    rd_input_col_size = ub_rd_col_size;
+end
+```
+
+This is essential for efficient matrix multiplication where one operand needs to be transposed.
+
+## Gradient descent integration
+
+The unified buffer includes built-in gradient descent modules:
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv:132-146:
+
+```systemverilog
+genvar i;
+generate
+    for (i=0; i<SYSTOLIC_ARRAY_WIDTH; i++) begin : gradient_descent_gen
+        gradient_descent gradient_descent_inst (
+            .clk(clk),
+            .rst(rst),
+            .lr_in(learning_rate_in),
+            .grad_in(ub_wr_data_in[i]),
+            .value_old_in(value_old_in[i]),
+            .grad_descent_valid_in(grad_descent_valid_in[i]),
+            .grad_bias_or_weight(grad_bias_or_weight),
+            .value_updated_out(value_updated_out[i]),
+            .grad_descent_done_out(grad_descent_done_out[i])
+        );
+    end
+endgenerate
+```
+
+### Gradient descent operation
+
+1. Read old parameter values using `ub_ptr_select = 5` (bias) or `6` (weight)
+2. VPU writes computed gradients to `ub_wr_data_in`
+3. Gradient descent module computes: `θ_new = θ_old - learning_rate × gradient`
+4. Updated values written back to buffer automatically
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv:355-368:
+
+```systemverilog
+if (grad_bias_or_weight) begin  // Weights (sequential addresses)
+    for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+        if (grad_descent_done_out[i]) begin
+            ub_memory[grad_descent_ptr] <= value_updated_out[i];
+            grad_descent_ptr = grad_descent_ptr + 1;
+        end
+    end
+end else begin  // Biases (parallel addresses)
+    for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+        if (grad_descent_done_out[i]) begin
+            ub_memory[grad_descent_ptr + i] <= value_updated_out[i];
+        end
+    end
+end
+```
+
+## Read timing patterns
+
+### Input read (to systolic array left edge)
+
+Data flows in a staggered pattern to match systolic dataflow:
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv:370-407:
+
+```systemverilog
+if (rd_input_time_counter + 1 < rd_input_row_size + rd_input_col_size) begin
+    for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+        if(rd_input_time_counter >= i && 
+           rd_input_time_counter < rd_input_row_size + i && 
+           i < rd_input_col_size) begin
+            ub_rd_input_valid_out[i] <= 1'b1;
+            ub_rd_input_data_out[i] <= ub_memory[rd_input_ptr];
+            rd_input_ptr = rd_input_ptr + 1;
+        end
+    end
+    rd_input_time_counter <= rd_input_time_counter + 1;
+end
+```
+
+### Weight read (to systolic array top edge)
+
+Weights are read in reverse order from the end of the matrix:
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv:187-203:
+
+```systemverilog
+if(ub_rd_transpose) begin
+    rd_weight_ptr = ub_rd_addr_in + ub_rd_col_size - 1;
+    ub_rd_col_size_out = ub_rd_row_size;
+end else begin
+    rd_weight_ptr = ub_rd_addr_in + ub_rd_row_size*ub_rd_col_size - ub_rd_col_size;
+    ub_rd_col_size_out = ub_rd_col_size;
+end
+```
+
+This ensures proper column-wise loading into the systolic array.
+
+## Example usage sequence
+
+### 1. Load weights from host
+
+```systemverilog
+ub_wr_host_valid_in[0] <= 1;
+ub_wr_host_valid_in[1] <= 1;
+ub_wr_host_data_in[0] <= weight_0;
+ub_wr_host_data_in[1] <= weight_1;
+// Weights stored at addresses [wr_ptr, wr_ptr+1]
+```
+
+### 2. Read inputs to systolic array
+
+```systemverilog
+ub_rd_start_in <= 1;
+ub_ptr_select <= 0;  // Input pointer
+ub_rd_addr_in <= 16'h0010;
+ub_rd_row_size <= 2;
+ub_rd_col_size <= 2;
+ub_rd_transpose <= 0;
+```
+
+### 3. Read weights to systolic array
+
+```systemverilog
+ub_ptr_select <= 1;  // Weight pointer
+ub_rd_addr_in <= 16'h0020;
+ub_rd_transpose <= 1;  // Transpose weight matrix
+```
+
+### 4. Perform gradient descent
+
+```systemverilog
+ub_ptr_select <= 6;  // Gradient weight pointer
+ub_rd_addr_in <= 16'h0020;  // Same address as weights
+// Gradient descent modules automatically read old values,
+// receive gradients from VPU, compute updates, and write back
+```
+
+## Memory layout example
+
+```
+Address | Content
+--------|------------------
+0x0000  | Input matrix X
+0x0010  | Weight matrix W1
+0x0020  | Bias vector b1
+0x0030  | Weight matrix W2
+0x0040  | Bias vector b2
+0x0050  | Ground truth Y
+0x0060  | Cached H1
+0x0070  | Cached H2
+```
+
+## Related modules
+
+- [TPU](/modules/tpu) - Top-level integration
+- [Systolic Array](/modules/systolic) - Primary data consumer
+- [VPU](/modules/vpu) - Secondary data consumer/producer
+- Gradient descent (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv) - Parameter update logic
+
+## Testing
+
+See test files:
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/dump_unified_buffer.sv - Waveform dump configuration
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/test_unified_buffer.py - Python test suite

@@ -1,0 +1,400 @@
+---
+title: Unified buffer
+description: Memory architecture for storing matrices and intermediate values
+---
+
+The unified buffer (UB) is the central memory system in the Tiny TPU. It stores all matrices, vectors, and intermediate values needed for neural network training, providing dual-port read/write access to support concurrent operations.
+
+## Module interface
+
+```systemverilog
+module unified_buffer #(
+    parameter int UNIFIED_BUFFER_WIDTH = 128,
+    parameter int SYSTOLIC_ARRAY_WIDTH = 2
+)(
+    input logic clk,
+    input logic rst,
+
+    // Write ports from VPU to UB
+    input logic [15:0] ub_wr_data_in [SYSTOLIC_ARRAY_WIDTH],
+    input logic ub_wr_valid_in [SYSTOLIC_ARRAY_WIDTH],
+
+    // Write ports from host to UB (for loading parameters)
+    input logic [15:0] ub_wr_host_data_in [SYSTOLIC_ARRAY_WIDTH],
+    input logic ub_wr_host_valid_in [SYSTOLIC_ARRAY_WIDTH],
+
+    // Read instruction inputs
+    input logic ub_rd_start_in,
+    input logic ub_rd_transpose,
+    input logic [8:0] ub_ptr_select,
+    input logic [15:0] ub_rd_addr_in,
+    input logic [15:0] ub_rd_row_size,
+    input logic [15:0] ub_rd_col_size,
+
+    // Learning rate input
+    input logic [15:0] learning_rate_in,
+
+    // Read ports to various destinations...
+);
+```
+
+Source: [unified_buffer.sv:6-60](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L6-L60)
+
+## Memory organization
+
+### Storage capacity
+
+The unified buffer contains a single-dimensional array:
+
+```systemverilog
+logic [15:0] ub_memory [0:UNIFIED_BUFFER_WIDTH-1];
+```
+
+With `UNIFIED_BUFFER_WIDTH = 128`:
+- Total capacity: 128 entries × 16 bits = 2,048 bits (256 bytes)
+- Each entry: 16-bit signed fixed-point (Q8.8)
+
+Source: [unified_buffer.sv:62](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L62)
+
+### Stored data types
+
+The unified buffer stores all data needed for training:
+
+1. **Input matrices** (X) - Training batch activations
+2. **Weight matrices** (W) - Layer parameters
+3. **Bias vectors** (b) - Layer biases
+4. **Activation values** (H) - Post-activation outputs for backprop
+5. **Target values** (Y) - Ground truth labels
+6. **Hyperparameters**:
+   - Activation leak factors
+   - Inverse batch size constants
+7. **Intermediate gradients** - During backpropagation
+
+<Note>
+Matrices are stored in **row-major format**. For a 2-column matrix, column 0 values are at even indices and column 1 values at odd indices.
+</Note>
+
+## Write operations
+
+### Write from VPU
+
+The VPU writes computation results back to the buffer:
+
+```systemverilog
+for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+    if (ub_wr_valid_in[i]) begin
+        ub_memory[wr_ptr] <= ub_wr_data_in[i];
+        wr_ptr = wr_ptr + 1;
+    end
+end
+```
+
+Source: [unified_buffer.sv:344-351](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L344-L351)
+
+<Warning>
+The loop decrements (i--) to maintain row-major storage order when writing multi-column data.
+</Warning>
+
+### Write from host
+
+The host can load initial parameters (weights, biases, inputs):
+
+```systemverilog
+for (int i = SYSTOLIC_ARRAY_WIDTH-1; i >= 0; i--) begin
+    if (ub_wr_host_valid_in[i]) begin
+        ub_memory[wr_ptr] <= ub_wr_host_data_in[i];
+        wr_ptr = wr_ptr + 1;
+    end
+end
+```
+
+Source: [unified_buffer.sv:348-351](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L348-L351)
+
+### Write pointer
+
+A single write pointer tracks the next write location:
+
+```systemverilog
+logic [15:0] wr_ptr;
+```
+
+The write pointer auto-increments after each write, requiring careful management by the control unit to avoid overwriting data.
+
+## Read operations
+
+The unified buffer supports **seven simultaneous read pointers**, each serving a different consumer:
+
+```systemverilog
+logic [15:0] rd_input_ptr;        // 0: Input data to systolic array
+logic [15:0] rd_weight_ptr;       // 1: Weights to systolic array
+logic [15:0] rd_bias_ptr;         // 2: Bias values to VPU
+logic [15:0] rd_Y_ptr;            // 3: Target values to VPU
+logic [15:0] rd_H_ptr;            // 4: Activation values to VPU
+logic [15:0] rd_grad_bias_ptr;    // 5: Bias gradients to grad descent
+logic [15:0] rd_grad_weight_ptr;  // 6: Weight gradients to grad descent
+```
+
+Source: [unified_buffer.sv:75-117](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L75-L117)
+
+### Read instruction format
+
+Reads are initiated by setting control signals:
+
+```systemverilog
+input logic ub_rd_start_in,         // Start read operation
+input logic ub_rd_transpose,        // Transpose during read
+input logic [8:0] ub_ptr_select,    // Which pointer to use (0-6)
+input logic [15:0] ub_rd_addr_in,   // Starting address
+input logic [15:0] ub_rd_row_size,  // Number of rows
+input logic [15:0] ub_rd_col_size,  // Number of columns
+```
+
+Source: [unified_buffer.sv:22-27](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L22-L27)
+
+### Pointer selection
+
+The `ub_ptr_select` signal determines which read operation to configure:
+
+```systemverilog
+always_comb begin
+    if (ub_rd_start_in) begin
+        case (ub_ptr_select)
+            0: begin  // Input data pointer
+                rd_input_transpose = ub_rd_transpose;
+                rd_input_ptr = ub_rd_addr_in;
+                // ...
+            end
+            1: begin  // Weight data pointer
+                rd_weight_transpose = ub_rd_transpose;
+                // ...
+            end
+            2: begin  // Bias pointer
+                rd_bias_ptr = ub_rd_addr_in;
+                // ...
+            end
+            // Cases 3-6 for Y, H, grad_bias, grad_weight...
+        endcase
+    end
+end
+```
+
+Source: [unified_buffer.sv:168-244](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L168-L244)
+
+## Transpose support
+
+The unified buffer can transpose matrices on-the-fly during reads:
+
+### Input transpose (pointer 0)
+
+```systemverilog
+if(ub_rd_transpose) begin
+    // Switch columns and rows
+    rd_input_row_size = ub_rd_col_size;
+    rd_input_col_size = ub_rd_row_size;
+end else begin
+    rd_input_row_size = ub_rd_row_size;
+    rd_input_col_size = ub_rd_col_size;
+end
+```
+
+Source: [unified_buffer.sv:176-182](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L176-L182)
+
+### Weight transpose (pointer 1)
+
+Weight reading is more complex due to systolic array requirements:
+
+```systemverilog
+if(ub_rd_transpose) begin
+    rd_weight_row_size = ub_rd_col_size;
+    rd_weight_col_size = ub_rd_row_size;
+    rd_weight_ptr = ub_rd_addr_in + ub_rd_col_size - 1;  // Start at bottom-right
+    ub_rd_col_size_out = ub_rd_row_size;
+end else begin
+    rd_weight_row_size = ub_rd_row_size;
+    rd_weight_col_size = ub_rd_col_size;
+    rd_weight_ptr = ub_rd_addr_in + ub_rd_row_size*ub_rd_col_size - ub_rd_col_size;
+    ub_rd_col_size_out = ub_rd_col_size;
+end
+rd_weight_skip_size = ub_rd_col_size + 1;
+```
+
+Source: [unified_buffer.sv:187-202](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L187-L202)
+
+<Tip>
+Weights are read in reverse order (bottom-up, right-to-left) to match the systolic array's data flow requirements. The `rd_weight_skip_size` determines the stride between elements.
+</Tip>
+
+## Staggered delivery
+
+To support systolic computation, the unified buffer staggers data delivery using time counters:
+
+```systemverilog
+logic [15:0] rd_input_time_counter;
+
+if (rd_input_time_counter + 1 < rd_input_row_size + rd_input_col_size) begin
+    for (int i = 0; i < SYSTOLIC_ARRAY_WIDTH; i++) begin
+        if(rd_input_time_counter >= i && 
+           rd_input_time_counter < rd_input_row_size + i && 
+           i < rd_input_col_size) begin
+            ub_rd_input_valid_out[i] <= 1'b1;
+            ub_rd_input_data_out[i] <= ub_memory[rd_input_ptr];
+            rd_input_ptr = rd_input_ptr + 1;
+        end else begin
+            ub_rd_input_valid_out[i] <= 1'b0;
+        end
+    end
+    rd_input_time_counter <= rd_input_time_counter + 1;
+end
+```
+
+Source: [unified_buffer.sv:371-397](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L371-L397)
+
+### Staggering example
+
+For a 2×2 matrix with 2 columns:
+
+```
+Time 0: Column 0 gets data, Column 1 idle
+Time 1: Column 0 gets data, Column 1 gets data
+Time 2: Column 0 gets data, Column 1 gets data  
+Time 3: Column 0 idle,      Column 1 gets data
+```
+
+This creates the diagonal wave pattern needed for systolic computation.
+
+## Gradient descent integration
+
+The unified buffer contains embedded gradient descent modules:
+
+```systemverilog
+generate
+    for (i=0; i<SYSTOLIC_ARRAY_WIDTH; i++) begin : gradient_descent_gen
+        gradient_descent gradient_descent_inst (
+            .clk(clk),
+            .rst(rst),
+            .lr_in(learning_rate_in),
+            .grad_in(ub_wr_data_in[i]),
+            .value_old_in(value_old_in[i]),
+            .grad_descent_valid_in(grad_descent_valid_in[i]),
+            .grad_bias_or_weight(grad_bias_or_weight),
+            .value_updated_out(value_updated_out[i]),
+            .grad_descent_done_out(grad_descent_done_out[i])
+        );
+    end
+endgenerate
+```
+
+Source: [unified_buffer.sv:132-146](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L132-L146)
+
+### Update mechanism
+
+When gradient descent completes:
+
+```systemverilog
+if (grad_descent_done_out[i]) begin
+    ub_memory[grad_descent_ptr] <= value_updated_out[i];
+    grad_descent_ptr = grad_descent_ptr + 1;
+end
+```
+
+This allows in-place parameter updates:
+```
+W_new = W_old - learning_rate × ∂L/∂W
+```
+
+Source: [unified_buffer.sv:356-361](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L356-L361)
+
+## Read ports
+
+The unified buffer provides dedicated output ports for each consumer:
+
+### To systolic array
+
+```systemverilog
+// Input data (left side of array)
+output logic [15:0] ub_rd_input_data_out_0,
+output logic [15:0] ub_rd_input_data_out_1,
+output logic ub_rd_input_valid_out_0,
+output logic ub_rd_input_valid_out_1,
+
+// Weights (top of array)
+output logic [15:0] ub_rd_weight_data_out_0,
+output logic [15:0] ub_rd_weight_data_out_1,
+output logic ub_rd_weight_valid_out_0,
+output logic ub_rd_weight_valid_out_1,
+```
+
+Source: [unified_buffer.sv:33-43](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L33-L43)
+
+### To VPU
+
+```systemverilog
+// Bias values
+output logic [15:0] ub_rd_bias_data_out_0,
+output logic [15:0] ub_rd_bias_data_out_1,
+
+// Target values (Y)
+output logic [15:0] ub_rd_Y_data_out_0,
+output logic [15:0] ub_rd_Y_data_out_1,
+
+// Activation values (H)
+output logic [15:0] ub_rd_H_data_out_0,
+output logic [15:0] ub_rd_H_data_out_1,
+```
+
+Source: [unified_buffer.sv:45-55](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L45-L55)
+
+<Note>
+Each output is duplicated for the two columns supported by the 2×2 systolic array.
+</Note>
+
+## Memory layout example
+
+Typical memory layout for a simple network:
+
+```
+Address | Content
+--------|------------------
+0-7     | Input matrix X (2×4)
+8-11    | Weight matrix W1 (2×2)
+12-15   | Weight matrix W2 (2×2)
+16-17   | Bias vector b1 (2)
+18-19   | Bias vector b2 (2)
+20-23   | Target matrix Y (2×2)
+24-27   | Cached H1 values
+28-31   | Cached H2 values
+32      | Leak factor
+33      | Inverse batch size × 2
+34-...  | Gradients and temporaries
+```
+
+## Performance characteristics
+
+### Bandwidth
+
+- **Write**: 2 values per cycle (from VPU or host)
+- **Read**: Up to 14 values per cycle (7 pointers × 2 columns)
+- **No conflicts**: Reads and writes use separate pointers
+
+### Latency
+
+- **Write**: 1 cycle (registered)
+- **Read**: 1 cycle (registered)
+- **Auto-increment**: Sequential reads stream at 1 value per cycle
+
+## Reset behavior
+
+On reset, all memory and control state clears:
+
+```systemverilog
+if (rst) begin
+    for (int i = 0; i < UNIFIED_BUFFER_WIDTH; i++) begin
+        ub_memory[i] <= '0;
+    end
+    wr_ptr <= '0;
+    // All read pointers reset to 0
+    // All counters reset to 0
+end
+```
+
+Source: [unified_buffer.sv:283-339](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/unified_buffer.sv#L283-L339)

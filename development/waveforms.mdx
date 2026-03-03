@@ -1,0 +1,320 @@
+---
+title: Working with GTKwave and waveforms
+description: View, analyze, and configure waveforms for debugging Tiny TPU modules
+---
+
+GTKwave is a waveform viewer that displays VCD (Value Change Dump) files generated during simulation. This guide covers how to view waveforms and configure GTKwave for Tiny TPU's fixed-point arithmetic.
+
+## Viewing waveforms
+
+### Generate waveforms
+
+Waveforms are automatically generated when you run any test:
+
+```bash
+make test_<MODULE_NAME>
+```
+
+This creates a VCD file in the `waveforms/` directory:
+
+```
+waveforms/
+├── pe.vcd
+├── systolic.vcd
+├── tpu.vcd
+└── ...
+```
+
+### Open waveforms
+
+There are two ways to open waveforms:
+
+<CodeGroup>
+
+```bash Direct method
+# Open GTKwave with the VCD file
+gtkwave waveforms/<MODULE_NAME>.vcd
+```
+
+```bash Makefile shorthand
+# Use the Makefile target (recommended)
+make show_<MODULE_NAME>
+```
+
+</CodeGroup>
+
+The Makefile method is preferred because it:
+- Automatically loads the VCD file
+- Applies saved signal configurations from `.gtkw` files
+- Ensures consistent viewing settings
+
+### Makefile show target
+
+The `show_%` target in the Makefile is defined as:
+
+```makefile
+show_%: waveforms/%.vcd waveforms/%.gtkw
+	gtkwave $^
+```
+
+This opens both the VCD waveform file and the saved GTKwave configuration.
+
+## Configuring GTKwave for fixed-point
+
+Tiny TPU uses Q8.8 fixed-point format (8 integer bits, 8 fractional bits). To view signals correctly in GTKwave, you need to configure the display format.
+
+### Fixed-point configuration steps
+
+<Steps>
+  <Step title="Select signals">
+    Right-click on all the signals you want to view in fixed-point format.
+  </Step>
+
+  <Step title="Open shift settings">
+    Navigate to: **Data Format** → **Fixed Point Shift** → **Specify**
+  </Step>
+
+  <Step title="Set fractional bits">
+    Enter `8` in the dialog box and click **OK**.
+    
+    This tells GTKwave that 8 bits represent the fractional part.
+  </Step>
+
+  <Step title="Set signed decimal">
+    Navigate to: **Data Format** → **Signed Decimal**
+    
+    This displays values as signed decimal numbers instead of hexadecimal.
+  </Step>
+
+  <Step title="Enable fixed-point mode">
+    Navigate to: **Data Format** → **Fixed Point Shift** → **ON**
+    
+    This activates the fixed-point display mode.
+  </Step>
+</Steps>
+
+<Tip>
+  After configuring the display format, save your configuration (File → Write Save File) to a `.gtkw` file so you don't have to repeat this process.
+</Tip>
+
+### Understanding the fixed-point format
+
+The Q8.8 format divides a 16-bit value:
+
+- **Bits [15:8]** - Integer part (8 bits)
+- **Bits [7:0]** - Fractional part (8 bits)
+- **Bit [15]** - Sign bit
+
+Examples:
+- `0x0100` = 1.0 (256 in decimal, shifted right by 8 bits)
+- `0x0280` = 2.5 (640 in decimal, 640/256 = 2.5)
+- `0xFF00` = -1.0 (two's complement)
+
+## GTKwave configuration files
+
+### What is a .gtkw file?
+
+A `.gtkw` file stores your GTKwave session configuration, including:
+- Which signals are displayed
+- Signal grouping and hierarchy
+- Display formats (hex, decimal, fixed-point, etc.)
+- Time markers and zoom level
+- Color schemes
+
+### Creating a .gtkw file
+
+<Steps>
+  <Step title="Open waveform in GTKwave">
+    ```bash
+    gtkwave waveforms/<MODULE_NAME>.vcd
+    ```
+  </Step>
+
+  <Step title="Configure your view">
+    - Add the signals you want to monitor
+    - Set display formats (fixed-point, decimal, etc.)
+    - Organize signals into groups
+    - Adjust zoom and markers
+  </Step>
+
+  <Step title="Save configuration">
+    Go to: **File** → **Write Save File**
+    
+    Save as: `waveforms/<MODULE_NAME>.gtkw`
+  </Step>
+
+  <Step title="Load saved configuration">
+    Next time you run:
+    ```bash
+    make show_<MODULE_NAME>
+    ```
+    
+    GTKwave will automatically load your saved configuration.
+  </Step>
+</Steps>
+
+<Note>
+  You only need to create the `.gtkw` file once per module. The `make show_<MODULE_NAME>` command will use it automatically.
+</Note>
+
+## Common waveform analysis tasks
+
+### Inspecting signal values
+
+<AccordionGroup>
+  <Accordion title="View signal at specific time">
+    - Click on the waveform at the desired time
+    - The value appears in the signal list
+    - Use markers (right-click → Insert Marker) for precise positioning
+  </Accordion>
+
+  <Accordion title="Measure timing">
+    - Insert a primary marker (right-click → Insert Primary Marker)
+    - Insert a secondary marker at another time
+    - The time difference appears in the status bar
+  </Accordion>
+
+  <Accordion title="Compare multiple signals">
+    - Add all signals to the viewer
+    - Align them vertically
+    - Use the same time markers to compare values
+  </Accordion>
+
+  <Accordion title="Trace signal changes">
+    - Right-click a signal
+    - Select "Search" → "Next Edge"
+    - GTKwave jumps to the next value change
+  </Accordion>
+</AccordionGroup>
+
+### Signal organization
+
+For complex modules, organize signals into logical groups:
+
+1. **Inputs** - All input signals
+2. **Outputs** - All output signals
+3. **Control** - Control signals (valid, enable, switch, etc.)
+4. **Data Path** - Data flowing through the module
+5. **Internal State** - Registers and internal signals
+
+### Debugging with waveforms
+
+When debugging a failing test:
+
+<Steps>
+  <Step title="Run the test">
+    ```bash
+    make test_<MODULE_NAME>
+    ```
+  </Step>
+
+  <Step title="Note the failure">
+    Check the console output for which assertion failed and at what time.
+  </Step>
+
+  <Step title="Open waveforms">
+    ```bash
+    make show_<MODULE_NAME>
+    ```
+  </Step>
+
+  <Step title="Navigate to failure point">
+    - Use time markers to jump to the failure time
+    - Examine signal values before and after the failure
+    - Trace backwards to find the root cause
+  </Step>
+
+  <Step title="Verify timing">
+    - Check that signals change on clock edges
+    - Verify pipeline stages are correct
+    - Look for setup/hold time violations
+  </Step>
+</Steps>
+
+## GTKwave tips and tricks
+
+<AccordionGroup>
+  <Accordion title="Zoom controls">
+    - **Zoom In**: Click and drag right
+    - **Zoom Out**: Click and drag left
+    - **Zoom Fit**: View → Zoom → Zoom Fit
+    - **Zoom Full**: View → Zoom → Zoom Full
+  </Accordion>
+
+  <Accordion title="Signal display formats">
+    Right-click a signal and choose Data Format:
+    - **Binary** - Show individual bits
+    - **Hexadecimal** - Compact view of values
+    - **Signed Decimal** - For fixed-point values
+    - **ASCII** - For character data
+    - **Analog** - Show as analog waveform
+  </Accordion>
+
+  <Accordion title="Color coding">
+    - Right-click a signal
+    - Select "Highlight" → Choose color
+    - Useful for tracking specific signals
+  </Accordion>
+
+  <Accordion title="Search and navigation">
+    - **Search forward**: Edit → Search → Next Edge
+    - **Search backward**: Edit → Search → Previous Edge
+    - **Jump to time**: Edit → Go To Time
+  </Accordion>
+</AccordionGroup>
+
+## Example: Viewing PE waveforms
+
+Let's walk through viewing waveforms for the Processing Element:
+
+```bash
+# Run the test
+make test_pe
+
+# View waveforms
+make show_pe
+```
+
+Key signals to monitor:
+- `clk` - System clock
+- `rst` - Reset signal
+- `pe_input_in` - Input data (configure as fixed-point)
+- `pe_weight_in` - Weight data (configure as fixed-point)
+- `pe_psum_in` - Partial sum input (configure as fixed-point)
+- `pe_psum_out` - Partial sum output (configure as fixed-point)
+- `pe_valid_in` - Valid signal
+- `pe_switch_in` - Weight buffer switch
+
+Look for:
+- Weights loading during setup phase
+- Input data flowing through on valid cycles
+- Correct multiply-accumulate results
+- Proper propagation of control signals
+
+## Cleanup
+
+To remove generated waveform files:
+
+```bash
+make clean
+```
+
+This removes:
+- All `.vcd` files in `waveforms/`
+- The `sim_build/` directory
+- Test cache files in `test/__pycache__/`
+
+<Warning>
+  The `make clean` command does NOT remove `.gtkw` configuration files, so your saved views are preserved.
+</Warning>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Learn more about writing tests
+  </Card>
+  <Card title="Adding modules" icon="plus" href="/development/adding-modules">
+    Add new modules to the project
+  </Card>
+</CardGroup>

@@ -1,0 +1,185 @@
+---
+title: PE
+description: Processing Element - the fundamental multiply-accumulate unit in the systolic array
+---
+
+The Processing Element (PE) is the basic computational building block of the systolic array. Each PE performs multiply-accumulate (MAC) operations using a weight stored in local registers and input data flowing from the west.
+
+## Module declaration
+
+```systemverilog
+module pe #(
+    parameter int DATA_WIDTH = 16
+) (
+    input logic clk,
+    input logic rst,
+    // North ports
+    input logic signed [15:0] pe_psum_in,
+    input logic signed [15:0] pe_weight_in,
+    input logic pe_accept_w_in,
+    // West ports
+    input logic signed [15:0] pe_input_in,
+    input logic pe_valid_in,
+    input logic pe_switch_in,
+    input logic pe_enabled,
+    // South ports
+    output logic signed [15:0] pe_psum_out,
+    output logic signed [15:0] pe_weight_out,
+    // East ports
+    output logic signed [15:0] pe_input_out,
+    output logic pe_valid_out,
+    output logic pe_switch_out
+);
+```
+
+## Parameters
+
+<ParamField path="DATA_WIDTH" type="int" default="16">
+  Bit width for data paths (currently unused in implementation)
+</ParamField>
+
+## Input ports
+
+### North ports (from PE above or top of array)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `pe_psum_in` | `signed [15:0]` | Partial sum input from north |
+| `pe_weight_in` | `signed [15:0]` | Weight value to load into shadow register |
+| `pe_accept_w_in` | 1 | Accept weight signal - loads `pe_weight_in` into shadow buffer |
+
+### West ports (from PE to the left or left edge of array)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `pe_input_in` | `signed [15:0]` | Input activation value |
+| `pe_valid_in` | 1 | Valid signal indicating input data is ready |
+| `pe_switch_in` | 1 | Switch signal to copy shadow weight to active register |
+| `pe_enabled` | 1 | Enable signal - when low, PE outputs zeros |
+
+## Output ports
+
+### South ports (to PE below or bottom of array)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `pe_psum_out` | `signed [15:0]` | Partial sum output = `pe_psum_in + (pe_input_in × weight_active)` |
+| `pe_weight_out` | `signed [15:0]` | Weight value forwarded to PE below |
+
+### East ports (to PE to the right or right edge of array)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `pe_input_out` | `signed [15:0]` | Input value forwarded to next PE |
+| `pe_valid_out` | 1 | Valid signal forwarded to next PE |
+| `pe_switch_out` | 1 | Switch signal forwarded to next PE |
+
+## Architecture
+
+### Weight buffering
+
+The PE uses a double-buffering scheme for weights:
+
+- **Active register** (`weight_reg_active`): Used for current computation
+- **Shadow register** (`weight_reg_inactive`): Holds next set of weights
+
+This allows preloading weights while computation proceeds with the current weights.
+
+### MAC operation
+
+The PE performs a multiply-accumulate operation:
+
+1. **Multiply**: `mult_out = pe_input_in × weight_reg_active`
+2. **Accumulate**: `mac_out = mult_out + pe_psum_in`
+3. **Output**: `pe_psum_out = mac_out` (when `pe_valid_in` is high)
+
+### Fixed-point arithmetic
+
+All operations use Q8.8 fixed-point format (8 integer bits, 8 fractional bits):
+
+- Multiplication: `fxp_mul` module (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278)
+- Addition: `fxp_add` module (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:110)
+
+### Signal flow diagram
+
+```
+        North
+          ↓
+      [psum_in]
+     [weight_in]
+   [accept_w_in]
+          |
+ West → [PE] → East
+ [input]  |  [input]
+ [valid]  |  [valid]
+[switch]  |  [switch]
+          ↓
+       [psum_out]
+     [weight_out]
+        South
+```
+
+## Operation sequence
+
+### Weight loading phase
+
+1. Assert `pe_accept_w_in` high
+2. Drive `pe_weight_in` with weight value
+3. On clock edge, weight loads into `weight_reg_inactive`
+4. Weight propagates to `pe_weight_out` for PE below
+
+### Weight switching phase
+
+1. Assert `pe_switch_in` high
+2. **Combinationally** (same cycle), `weight_reg_active ← weight_reg_inactive`
+3. Switch signal propagates east
+
+### Computation phase
+
+1. Drive `pe_input_in` with activation value
+2. Assert `pe_valid_in` high
+3. On clock edge:
+   - PE computes MAC operation
+   - `pe_psum_out` = `pe_psum_in + (pe_input_in × weight_reg_active)`
+   - Input and valid signals propagate east
+
+## Example instantiation
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv:56-74:
+
+```systemverilog
+pe pe11 (
+    .clk(clk),
+    .rst(rst),
+    .pe_enabled(pe_enabled[0]),
+    .pe_valid_in(sys_start),
+    .pe_valid_out(pe_valid_out_11),
+    .pe_accept_w_in(sys_accept_w_1),
+    .pe_switch_in(sys_switch_in),
+    .pe_switch_out(pe_switch_out_11),
+    .pe_input_in(sys_data_in_11),
+    .pe_psum_in(16'b0),
+    .pe_weight_in(sys_weight_in_11),
+    .pe_input_out(pe_input_out_11),
+    .pe_psum_out(pe_psum_out_11),
+    .pe_weight_out(pe_weight_out_11)
+);
+```
+
+## Timing behavior
+
+- **Weight loading**: Registered (sequential, 1 cycle)
+- **Weight switching**: Combinational (0 cycles)
+- **MAC operation**: Registered (sequential, 1 cycle)
+- **Signal propagation**: Registered (sequential, 1 cycle)
+
+## Related modules
+
+- [Systolic Array](/modules/systolic) - PE array organization
+- Fixed-point library (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv) - Arithmetic modules
+
+## Testing
+
+See test files:
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/dump_pe.sv - Waveform dump configuration
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/test_pe.py - Python test suite

@@ -1,0 +1,167 @@
+---
+title: VPU data pathway configurations
+description: Understanding Vector Processing Unit pipeline routing and module activation patterns
+---
+
+The Vector Processing Unit (VPU) contains four pipelined processing modules that can be selectively activated using the 4-bit `vpu_data_pathway` field.
+
+## VPU pipeline modules
+
+The VPU consists of four sequential modules:
+
+1. **Bias addition** - Adds bias vectors to systolic array outputs
+2. **Leaky ReLU** - Applies activation function with configurable leak factor
+3. **MSE loss** - Computes mean squared error against target values
+4. **Leaky ReLU derivative** - Computes gradient of activation function
+
+Each module can be independently enabled or bypassed based on the current computation stage.
+
+## Pathway configurations
+
+The 4-bit `vpu_data_pathway` field controls which modules are active:
+
+### Forward pass - Layer 1
+
+```
+vpu_data_pathway = 0b1100
+```
+
+**Active modules**: Bias addition → Leaky ReLU
+
+**Data flow**:
+1. Systolic array output (Z1) enters VPU
+2. Bias module adds B1 vector
+3. Leaky ReLU applies activation
+4. Result (H1) exits VPU
+
+**Usage**: Computing hidden layer activations during forward propagation
+
+### Forward pass - Output layer with loss
+
+```
+vpu_data_pathway = 0b1111
+```
+
+**Active modules**: Bias addition → Leaky ReLU → MSE loss
+
+**Data flow**:
+1. Systolic array output (Z2) enters VPU
+2. Bias module adds B2 vector
+3. Leaky ReLU applies activation (H2)
+4. MSE loss computes error against target Y
+5. Result (dL/dZ2) exits VPU
+
+**Usage**: Computing final layer output and beginning backpropagation
+
+<Note>
+This pathway is described in comments as the "transition pathway from forward pass to backward pass" because it both completes the forward computation and produces the first gradient.
+</Note>
+
+### Backward pass - Activation derivative
+
+```
+vpu_data_pathway = 0b0001
+```
+
+**Active modules**: Leaky ReLU derivative only
+
+**Data flow**:
+1. Upstream gradient (dL/dZ_next) enters VPU
+2. Leaky ReLU derivative module multiplies by activation gradient
+3. Result (dL/dZ) exits VPU
+
+**Usage**: Propagating gradients through activation functions during backpropagation
+
+### Gradient computation - Bypass mode
+
+```
+vpu_data_pathway = 0b0000
+```
+
+**Active modules**: None (full bypass)
+
+**Data flow**:
+1. Systolic array output passes directly through VPU
+2. No processing applied
+3. Raw systolic output exits VPU
+
+**Usage**: Weight gradient calculation where VPU processing is not needed
+
+## Pointer routing coordination
+
+The VPU pathway configuration must be coordinated with `ub_ptr_sel` to route the correct data to each module:
+
+| Pathway | Module needing data | ub_ptr_sel | Data source |
+|---------|-------------------|-----------|-------------|
+| `0b1100` | Bias addition | `010` | Bias vector from UB |
+| `0b1111` | Bias addition | `010` | Bias vector from UB |
+| `0b1111` | MSE loss | `011` | Target values (Y) from UB |
+| `0b0001` | Leaky ReLU derivative | `100` | Pre-activation values (H) from UB |
+
+## Example: Forward pass configuration
+
+From `test_tpu.py:184-203`, loading inputs and computing first layer:
+
+```python
+# Configure for forward pass through layer 1
+dut.vpu_data_pathway.value = 0b1100  # Bias + ReLU routing
+
+# Read input matrix X into systolic array
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 0  # Route to systolic left input
+dut.ub_rd_addr_in.value = 0
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 2
+
+# Read bias B1 into VPU bias module
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 2  # Route to bias module
+dut.ub_rd_addr_in.value = 16
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 2
+```
+
+**Result**: Systolic array computes X @ W1^T, then VPU adds B1 and applies Leaky ReLU to produce H1
+
+## Example: Backward pass configuration
+
+From `test_tpu.py:322-349`, computing gradients for layer 1:
+
+```python
+# Configure for backward pass activation derivative
+dut.vpu_data_pathway.value = 0b0001  # Activation derivative only
+
+# Read upstream gradient into systolic array
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 0  # Route to systolic left input
+dut.ub_rd_addr_in.value = 29
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 1
+
+# Read pre-activation H1 into VPU derivative module
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 4  # Route to activation derivative
+dut.ub_rd_addr_in.value = 21
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 2
+```
+
+**Result**: Systolic output multiplied element-wise with activation derivatives to propagate gradient
+
+## Gradient descent data routing
+
+During weight updates, the VPU uses additional pointer selections:
+
+```python
+# Route old bias values to gradient descent module
+dut.ub_ptr_select.value = 5  # Gradient descent (bias)
+
+# Route old weight values to gradient descent module  
+dut.ub_ptr_select.value = 6  # Gradient descent (weights)
+```
+
+These pointer selections work with `vpu_data_pathway = 0b0000` (bypass mode) since gradient descent happens after the main VPU pipeline.
+
+<Tip>
+The VPU is fully pipelined - new data can enter every cycle even while previous data is still processing through later stages.
+</Tip>

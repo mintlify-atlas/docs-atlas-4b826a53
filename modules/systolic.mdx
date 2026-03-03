@@ -1,0 +1,197 @@
+---
+title: Systolic array
+description: 2×2 systolic array for matrix multiplication using processing elements
+---
+
+The systolic array module implements a 2×2 grid of processing elements (PEs) that perform matrix multiplication using a systolic dataflow pattern. Data flows through the array in a wave-like fashion, with inputs entering from the left and weights from the top.
+
+## Module declaration
+
+```systemverilog
+module systolic #(
+    parameter int SYSTOLIC_ARRAY_WIDTH = 2
+)(
+    input logic clk,
+    input logic rst,
+    // Left inputs
+    input logic [15:0] sys_data_in_11,
+    input logic [15:0] sys_data_in_21,
+    input logic sys_start,
+    // Right outputs
+    output logic [15:0] sys_data_out_21,
+    output logic [15:0] sys_data_out_22,
+    output wire sys_valid_out_21,
+    output wire sys_valid_out_22,
+    // Top inputs
+    input logic [15:0] sys_weight_in_11,
+    input logic [15:0] sys_weight_in_12,
+    input logic sys_accept_w_1,
+    input logic sys_accept_w_2,
+    input logic sys_switch_in,
+    // Column enable
+    input logic [15:0] ub_rd_col_size_in,
+    input logic ub_rd_col_size_valid_in
+);
+```
+
+## Parameters
+
+<ParamField path="SYSTOLIC_ARRAY_WIDTH" type="int" default="2">
+  Width of the systolic array (number of PEs per row/column)
+</ParamField>
+
+## Input ports
+
+### Left edge inputs (activation values)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `sys_data_in_11` | `[15:0]` | Input data for row 1 (enters PE at position [1,1]) |
+| `sys_data_in_21` | `[15:0]` | Input data for row 2 (enters PE at position [2,1]) |
+| `sys_start` | 1 | Start signal (valid) for input data, propagates left-to-right in row 1 |
+
+### Top edge inputs (weight values)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `sys_weight_in_11` | `[15:0]` | Weight input for column 1 (enters PE at position [1,1]) |
+| `sys_weight_in_12` | `[15:0]` | Weight input for column 2 (enters PE at position [1,2]) |
+| `sys_accept_w_1` | 1 | Accept weight signal for column 1, propagates top-to-bottom |
+| `sys_accept_w_2` | 1 | Accept weight signal for column 2, propagates top-to-bottom |
+
+### Control signals
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `sys_switch_in` | 1 | Switch signal to activate preloaded weights, propagates diagonally |
+| `ub_rd_col_size_in` | `[15:0]` | Number of columns to enable (1 or 2) |
+| `ub_rd_col_size_valid_in` | 1 | Valid signal for column size |
+
+## Output ports
+
+### Bottom edge outputs (partial sums)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `sys_data_out_21` | `[15:0]` | Accumulated result from PE [2,1] (bottom-left) |
+| `sys_data_out_22` | `[15:0]` | Accumulated result from PE [2,2] (bottom-right) |
+| `sys_valid_out_21` | 1 | Valid signal for `sys_data_out_21` |
+| `sys_valid_out_22` | 1 | Valid signal for `sys_data_out_22` |
+
+## Architecture
+
+### PE grid layout
+
+```
+     weight_in_11    weight_in_12
+           ↓              ↓
+        [PE 1,1] ───→ [PE 1,2]
+           ↓              ↓
+data_in_11 →           (not used)
+data_in_21 → [PE 2,1] ───→ [PE 2,2]
+              ↓              ↓
+         data_out_21   data_out_22
+```
+
+### Dataflow pattern
+
+1. **Inputs** flow from left to right across each row
+2. **Weights** flow from top to bottom down each column
+3. **Partial sums** flow from top to bottom down each column
+4. **Valid signals** propagate with the data
+
+### PE interconnections
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv:56-134:
+
+```systemverilog
+// PE [1,1] - top-left
+pe pe11 (
+    .pe_psum_in(16'b0),              // Top row starts with 0
+    .pe_input_in(sys_data_in_11),    // Input from left edge
+    .pe_valid_in(sys_start),         // Start signal
+    .pe_weight_in(sys_weight_in_11), // Weight from top edge
+    .pe_input_out(pe_input_out_11),  // → PE [1,2]
+    .pe_psum_out(pe_psum_out_11),    // → PE [2,1]
+    .pe_weight_out(pe_weight_out_11) // → PE [2,1]
+);
+
+// PE [2,1] - bottom-left
+pe pe21 (
+    .pe_psum_in(pe_psum_out_11),     // Accumulate from PE [1,1]
+    .pe_weight_in(pe_weight_out_11), // Weight from PE [1,1]
+    .pe_psum_out(sys_data_out_21)    // → Output
+);
+
+// Similar for PE [1,2] and PE [2,2]
+```
+
+## Operation modes
+
+### Weight preloading
+
+1. Assert `sys_accept_w_1` and/or `sys_accept_w_2`
+2. Drive weights on `sys_weight_in_*` ports
+3. Weights load into shadow buffers column-by-column
+4. Weights propagate down each column to all PEs
+
+### Weight activation
+
+1. Assert `sys_switch_in` high for one cycle
+2. All PEs switch from shadow to active weight registers
+3. Switch signal propagates diagonally through the array
+
+### Matrix multiplication
+
+1. Drive input activations on `sys_data_in_*` ports
+2. Assert `sys_start` to begin computation
+3. Results appear at `sys_data_out_*` after propagation delay
+4. For 2×2 array, output appears after 3 clock cycles
+
+### Dynamic column sizing
+
+The array supports disabling columns for smaller matrices:
+
+```systemverilog
+always@(posedge clk or posedge rst) begin
+    if(ub_rd_col_size_valid_in) begin
+        pe_enabled <= (1 << ub_rd_col_size_in) - 1;
+    end
+end
+```
+
+- `ub_rd_col_size_in = 1`: Only column 1 enabled (`pe_enabled = 2'b01`)
+- `ub_rd_col_size_in = 2`: Both columns enabled (`pe_enabled = 2'b11`)
+
+## Timing example
+
+For a 2×2 matrix multiplication A × B:
+
+```
+Cycle | Input         | PE Activity        | Output
+------|---------------|--------------------|---------
+  0   | A[0,0]        | PE11: A[0,0]×B[0,0]| -
+  1   | A[1,0], A[0,1]| PE11: A[0,1]×B[0,1]| -
+      |               | PE21: A[1,0]×B[0,0]|
+  2   | A[1,1]        | PE21: A[1,0]×B[0,1]| C[0,0]
+      |               | PE22: A[1,1]×B[1,1]|
+  3   | -             | -                  | C[1,0], C[1,1]
+```
+
+## Signal propagation delays
+
+- Input to output latency: **3 clock cycles** (for 2×2 array)
+- Weight loading: **1 cycle** per row
+- Weight switching: **Combinational** (0 cycles)
+
+## Related modules
+
+- [PE](/modules/pe) - Processing element implementation
+- [TPU](/modules/tpu) - Top-level integration
+- [Unified Buffer](/modules/unified-buffer) - Data source
+
+## Testing
+
+See test files:
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/dump_systolic.sv - Waveform dump configuration
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/test_systolic.py - Python test suite

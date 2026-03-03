@@ -1,80 +1,373 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick start
+description: Get your first Tiny TPU simulation running in minutes
 ---
 
-## Get started in three steps
+## Prerequisites
 
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
+Before you begin, make sure you have the following installed on your system:
 
 <AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
+  <Accordion title="Python environment" icon="python">
+    You'll need Python 3.7 or later with virtual environment support. This is used for running the cocotb testbenches.
   </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
+  <Accordion title="Verilog simulator" icon="microchip">
+    Icarus Verilog is required to simulate the SystemVerilog hardware designs.
+  </Accordion>
+  <Accordion title="Waveform viewer" icon="chart-line">
+    GTKWave is used to visualize signal waveforms from your simulations.
   </Accordion>
 </AccordionGroup>
 
-### Step 2: Deploy your changes
+## Installation
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+<Tabs>
+  <Tab title="macOS">
+    <Steps>
+      <Step title="Create virtual environment">
+        Create and activate a Python virtual environment:
+        ```bash
+        python3 -m venv venv
+        source venv/bin/activate
+        ```
+      </Step>
+      <Step title="Install cocotb">
+        Install the cocotb testing framework:
+        ```bash
+        pip install cocotb
+        ```
+      </Step>
+      <Step title="Install Icarus Verilog">
+        Use Homebrew to install the Verilog simulator:
+        ```bash
+        brew install iverilog
+        ```
+      </Step>
+      <Step title="Build GTKWave">
+        <Warning>
+          On macOS, you must build GTKWave from source. Other installation methods currently do not work correctly.
+        </Warning>
+        
+        Download and build GTKWave from the [official repository](https://github.com/gtkwave/gtkwave).
+      </Step>
+    </Steps>
+  </Tab>
+  <Tab title="Ubuntu/Linux">
+    <Steps>
+      <Step title="Create virtual environment">
+        Create and activate a Python virtual environment:
+        ```bash
+        python3 -m venv venv
+        source venv/bin/activate
+        ```
+      </Step>
+      <Step title="Install cocotb">
+        Install the cocotb testing framework:
+        ```bash
+        pip install cocotb
+        ```
+      </Step>
+      <Step title="Install GTKWave">
+        Install the waveform viewer:
+        ```bash
+        sudo apt install gtkwave
+        ```
+      </Step>
+      <Step title="Install Icarus Verilog">
+        Install the Verilog simulator:
+        ```bash
+        sudo apt install iverilog
+        ```
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Clone the repository
+
+Get the Tiny TPU source code:
+
+```bash
+git clone https://github.com/yourusername/tiny-tpu.git
+cd tiny-tpu
+```
+
+## Run your first simulation
+
+Let's run a complete TPU simulation that performs forward and backward passes through a neural network.
+
+<Steps>
+  <Step title="Set environment variables">
+    The Makefile automatically sets these required environment variables:
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    ```bash
+    export COCOTB_REDUCED_LOG_FMT=1
+    export LIBPYTHON_LOC=$(cocotb-config --libpython)
+    export PYTHONPATH=test:$PYTHONPATH
+    ```
+    
+    <Note>
+      You don't need to set these manually — the Makefile handles this for you.
+    </Note>
+  </Step>
+  
+  <Step title="Run the TPU test">
+    Execute the complete TPU simulation:
+    
+    ```bash
+    make test_tpu
+    ```
+    
+    This command:
+    - Compiles all SystemVerilog source files from `src/`
+    - Runs the testbench from `test/test_tpu.py`
+    - Generates a waveform file `tpu.vcd` in the `waveforms/` directory
+    - Verifies that all tests pass
+    
+    <Info>
+      The test performs a complete XOR neural network training cycle with forward pass (matrix multiplication, bias addition, activation) and backward pass (gradient computation).
+    </Info>
+  </Step>
+  
+  <Step title="View the waveforms">
+    Open the generated waveform in GTKWave:
+    
+    ```bash
+    make show_tpu
+    ```
+    
+    Or manually with:
+    
+    ```bash
+    gtkwave waveforms/tpu.vcd
+    ```
+    
+    You'll see all the signals flowing through the TPU, including:
+    - Input data moving horizontally through the systolic array
+    - Partial sums flowing vertically
+    - VPU activation functions processing data
+    - Results being written back to the unified buffer
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Understanding the test
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+The `test_tpu.py` testbench implements a complete XOR problem:
 
-### Step 3: Go live
+```python
+# Input data (XOR truth table)
+X = np.array([[0., 0.],
+              [0., 1.],
+              [1., 0.],
+              [1., 1.]])
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+# Expected output
+Y = np.array([0, 1, 1, 0])
+
+# First layer weights (2x2 matrix)
+W1 = np.array([[0.2985, -0.5792], 
+               [0.0913, 0.4234]])
+
+# Second layer weights
+W2 = np.array([0.5266, 0.2958])
+
+# Learning rate
+learning_rate = 0.75
+leak_factor = 0.5  # For Leaky ReLU
+```
+
+The test:
+1. Loads matrices into the unified buffer
+2. Executes forward pass instructions through the systolic array and VPU
+3. Computes loss using MSE
+4. Performs backward pass to calculate gradients
+5. Updates weights using gradient descent
+
+<Check>
+  All values use 16-bit fixed-point arithmetic with 8 fractional bits, implemented in `src/fixedpoint.sv`.
+</Check>
+
+## Try other modules
+
+Once you've run the complete TPU simulation, try testing individual components:
+
+<CodeGroup>
+```bash Processing element
+make test_pe
+make show_pe
+```
+
+```bash Systolic array
+make test_systolic
+make show_systolic
+```
+
+```bash Vector processing unit
+make test_vpu
+make show_vpu
+```
+
+```bash Unified buffer
+make test_unified_buffer
+make show_unified_buffer
+```
+</CodeGroup>
+
+## Configure GTKWave for fixed-point viewing
+
+To properly view fixed-point values in GTKWave:
+
+<Steps>
+  <Step title="Select signals">
+    Right-click the signals you want to view in fixed-point format
+  </Step>
+  
+  <Step title="Set fixed-point shift">
+    Navigate to: **Data Format** → **Fixed Point Shift** → **Specify**
+    
+    Enter `8` (for 8 fractional bits) and click **OK**
+  </Step>
+  
+  <Step title="Set signed decimal format">
+    Set: **Data Format** → **Signed Decimal**
+  </Step>
+  
+  <Step title="Enable fixed-point display">
+    Enable: **Data Format** → **Fixed Point Shift** → **ON**
+  </Step>
+  
+  <Step title="Save configuration">
+    Save your GTKWave configuration:
+    
+    **File** → **Write Save File**
+    
+    Save as `waveforms/tpu.gtkw`
+    
+    <Note>
+      The `.gtkw` file stores your signal selection and formatting. You only need to configure this once — future runs of `make show_tpu` will load your saved configuration automatically.
+    </Note>
+  </Step>
+</Steps>
+
+## What's happening in the simulation?
+
+When you run `make test_tpu`, here's what occurs:
+
+<Steps>
+  <Step title="Compilation">
+    Icarus Verilog compiles all SystemVerilog modules:
+    ```
+    src/pe.sv              # Processing elements
+    src/systolic.sv        # Systolic array
+    src/vpu.sv             # Vector processing unit
+    src/unified_buffer.sv  # Memory buffer
+    src/control_unit.sv    # Instruction decoder
+    src/tpu.sv             # Top-level integration
+    ```
+  </Step>
+  
+  <Step title="Simulation">
+    The cocotb testbench (`test/test_tpu.py`) runs:
+    - Initializes the TPU with reset
+    - Loads test data into the unified buffer
+    - Issues 94-bit instructions to the control unit
+    - Monitors outputs and verifies correctness
+  </Step>
+  
+  <Step title="Waveform generation">
+    The dump module (`test/dump_tpu.sv`) captures all signals:
+    ```systemverilog
+    module dump();
+    initial begin
+      $dumpfile("waveforms/tpu.vcd");
+      $dumpvars(0, tpu); 
+    end
+    endmodule
+    ```
+  </Step>
+  
+  <Step title="Verification">
+    The Makefile checks for test failures:
+    ```bash
+    ! grep failure results.xml
+    ```
+    
+    If any assertions fail, the build will stop and report the error.
+  </Step>
+</Steps>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card
+    title="Explore the architecture"
+    icon="sitemap"
+    href="/architecture/overview"
+  >
+    Learn how the systolic array, VPU, and unified buffer work together
+  </Card>
+  <Card
+    title="Understand the ISA"
+    icon="book"
+    href="/instruction-set/overview"
+  >
+    Dive into the 94-bit instruction set that controls the TPU
+  </Card>
+  <Card
+    title="Add a new module"
+    icon="plus"
+    href="/development/adding-modules"
+  >
+    Learn the workflow for developing and testing new hardware modules
+  </Card>
+  <Card
+    title="Debug with waveforms"
+    icon="magnifying-glass-chart"
+    href="/development/waveforms"
+  >
+    Master GTKWave for analyzing signal timing and data flow
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Command not found: cocotb-config" icon="triangle-exclamation">
+    Make sure your virtual environment is activated:
+    ```bash
+    source venv/bin/activate
+    ```
+    
+    Then verify cocotb is installed:
+    ```bash
+    pip list | grep cocotb
+    ```
+  </Accordion>
+  
+  <Accordion title="Test failures in results.xml" icon="circle-xmark">
+    Check the cocotb output for assertion errors. The test will show which expected values didn't match the actual hardware output.
+    
+    Common issues:
+    - Timing problems (data arriving on wrong clock cycle)
+    - Fixed-point conversion errors
+    - Incorrect instruction sequencing
+  </Accordion>
+  
+  <Accordion title="GTKWave shows incorrect values" icon="chart-line">
+    Make sure you've configured fixed-point viewing correctly:
+    - Fixed Point Shift: 8
+    - Data Format: Signed Decimal
+    - Fixed Point Shift: ON
+    
+    Raw values in GTKWave are in 16-bit fixed-point format — you need to apply the 8-bit shift to see the actual decimal values.
+  </Accordion>
+  
+  <Accordion title="Waveform file not generated" icon="file">
+    Check that the `waveforms/` directory exists:
+    ```bash
+    mkdir -p waveforms
+    ```
+    
+    The Makefile creates this automatically, but if you've run `make clean`, you may need to recreate it.
+  </Accordion>
+</AccordionGroup>

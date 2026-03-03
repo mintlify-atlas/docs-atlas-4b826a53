@@ -1,0 +1,253 @@
+---
+title: Leaky ReLU derivative module
+description: Compute leaky ReLU activation derivatives for backpropagation
+---
+
+The leaky ReLU derivative module computes the derivative of the leaky ReLU activation function during backpropagation. This module multiplies upstream gradients by the local activation derivative, implementing the chain rule for gradient flow through the network.
+
+## Architecture
+
+The module follows the standard parent-child hierarchy:
+
+- **leaky_relu_derivative_parent**: Top-level module instantiating two child modules
+- **leaky_relu_derivative_child**: Processing unit computing derivative for one column
+
+The dual-column architecture processes two gradient values in parallel, maintaining consistency with the VPU's systolic array configuration.
+
+## Module ports
+
+### leaky_relu_derivative_parent
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="lr_leak_factor_in" type="input logic signed [15:0]">
+  Leak factor (α) used in forward pass, shared across both columns
+</ParamField>
+
+<ParamField path="lr_d_valid_1_in" type="input logic">
+  Valid signal for column 1 input
+</ParamField>
+
+<ParamField path="lr_d_valid_2_in" type="input logic">
+  Valid signal for column 2 input
+</ParamField>
+
+<ParamField path="lr_d_data_1_in" type="input logic signed [15:0]">
+  Upstream gradient for column 1
+</ParamField>
+
+<ParamField path="lr_d_data_2_in" type="input logic signed [15:0]">
+  Upstream gradient for column 2
+</ParamField>
+
+<ParamField path="lr_d_H_1_in" type="input logic signed [15:0]">
+  Cached forward pass activation (H) for column 1
+</ParamField>
+
+<ParamField path="lr_d_H_2_in" type="input logic signed [15:0]">
+  Cached forward pass activation (H) for column 2
+</ParamField>
+
+<ParamField path="lr_d_data_1_out" type="output logic signed [15:0]">
+  Computed gradient for column 1
+</ParamField>
+
+<ParamField path="lr_d_data_2_out" type="output logic signed [15:0]">
+  Computed gradient for column 2
+</ParamField>
+
+<ParamField path="lr_d_valid_1_out" type="output logic">
+  Valid signal for column 1 output
+</ParamField>
+
+<ParamField path="lr_d_valid_2_out" type="output logic">
+  Valid signal for column 2 output
+</ParamField>
+
+### leaky_relu_derivative_child
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="lr_d_valid_in" type="input logic">
+  Input valid signal
+</ParamField>
+
+<ParamField path="lr_d_data_in" type="input logic signed [15:0]">
+  Upstream gradient (∂L/∂H)
+</ParamField>
+
+<ParamField path="lr_leak_factor_in" type="input logic signed [15:0]">
+  Leak factor (α)
+</ParamField>
+
+<ParamField path="lr_d_H_data_in" type="input logic signed [15:0]">
+  Forward pass activation value (H) for determining derivative
+</ParamField>
+
+<ParamField path="lr_d_data_out" type="output logic signed [15:0]">
+  Output gradient (∂L/∂Z)
+</ParamField>
+
+<ParamField path="lr_d_valid_out" type="output logic">
+  Output valid signal
+</ParamField>
+
+## Derivative function
+
+The derivative of leaky ReLU is:
+
+```
+f'(z) = { 1     if z ≥ 0
+        { α     if z < 0
+```
+
+Where **z** is the pre-activation value and **α** is the leak factor.
+
+During backpropagation, the chain rule gives:
+
+```
+∂L/∂Z = ∂L/∂H × f'(Z)
+```
+
+Where:
+- **∂L/∂H** is the upstream gradient (from the next layer)
+- **f'(Z)** is the activation derivative
+- **∂L/∂Z** is the gradient to propagate to the previous layer
+
+## Operation
+
+### Algorithm
+
+The derivative module determines the activation derivative based on the sign of the **cached forward pass activation (H)**:
+
+1. **Check forward pass value**: Examine sign of `lr_d_H_data_in`
+2. **Conditional gradient computation**:
+   - If `H >= 0`: Derivative is 1, pass gradient through unchanged: `output = input`
+   - If `H < 0`: Derivative is α, scale gradient: `output = input × α`
+3. **Register output**: On clock edge, output the computed gradient with valid signal
+
+### Pipeline stages
+
+1. **Sign detection**: Check if cached activation H is non-negative (combinational)
+2. **Conditional computation**:
+   - Non-negative path: Direct assignment (no operation)
+   - Negative path: Fixed-point multiply using `fxp_mul`
+3. **Registered output**: Result and valid signal latched on clock edge
+
+### Why use H instead of Z?
+
+The module uses the **activated value H** rather than the **pre-activation Z** to determine the derivative:
+
+- For standard leaky ReLU: sign(H) = sign(Z), so either works
+- Using H is convenient because it's already available from the forward pass
+- H values are cached in the VPU during the transition pathway
+- This avoids needing to cache additional pre-activation values
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_child.sv:31` for the implementation.
+
+### Fixed-point arithmetic
+
+The module uses 16-bit signed fixed-point (Q8.8 format):
+
+- **Multiplication**: When H < 0, `fxp_mul` computes `gradient × leak_factor`
+  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278`
+  - Handles binary point alignment
+  - Detects overflow conditions
+
+- **Pass-through**: When H >= 0, gradient passes unchanged (derivative = 1)
+
+## Integration with VPU
+
+The leaky ReLU derivative module is active during transition and backward pass pathways:
+
+- **Pathway 1111** (transition): `systolic → bias → leaky_relu → loss → leaky_relu_derivative → output`
+- **Pathway 0001** (backward): `systolic → leaky_relu_derivative → output`
+
+When `vpu_data_pathway[0]` is set to 1:
+
+### Transition pathway (1111)
+- Loss module gradients route to derivative inputs
+- Cached H values (from leaky ReLU forward pass) route to H inputs
+- Leak factor provided from unified buffer
+- Outputs route to final VPU output (back to unified buffer)
+
+### Backward pathway (0001)
+- Systolic array outputs (upstream gradients) route to derivative inputs
+- H values provided from unified buffer (pre-cached from forward pass)
+- Leak factor provided from unified buffer
+- Outputs route to final VPU output for further backpropagation
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:304-328` for the derivative routing logic.
+
+## Data flow
+
+### Transition phase
+```
+Loss Gradient
+      |
+      v
+[lr_derivative_child] <-- H from leaky_relu cache
+                      <-- Leak factor α from UB
+      |
+      v
+ Output to UB (∂L/∂Z)
+```
+
+### Backward phase
+```
+Systolic Array (upstream ∂L/∂H)
+      |
+      v
+[lr_derivative_child] <-- H from UB (cached)
+                      <-- Leak factor α from UB
+      |
+      v
+ Output to UB (∂L/∂Z)
+```
+
+## H value caching
+
+The VPU includes special logic for caching H values:
+
+- During **transition pathway (1111)**: H values from leaky ReLU are cached in internal registers
+- Cache update: See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:282-285`
+- Cache usage: Cached values route to derivative module during transition
+- For subsequent backward passes: H values are loaded from unified buffer (pre-stored during forward pass)
+
+## Implementation details
+
+- **Latency**: 1 clock cycle (registered output)
+- **Throughput**: 2 gradients per cycle
+- **Sign check**: Uses MSB of H value (sign bit)
+- **Multiplication**: Only performed for negative activations
+- **Reset behavior**: Outputs and valid signals cleared to zero
+- **Valid signal**: Propagated from input to output with one cycle delay
+
+## Gradient flow example
+
+Consider a batch element where:
+- Upstream gradient: `∂L/∂H = 0.5` (0x0080 in Q8.8)
+- Cached activation: `H = -0.2` (0xFF33 in Q8.8)
+- Leak factor: `α = 0.1` (0x0019 in Q8.8)
+
+The module computes:
+1. Check H: H < 0, so use scaled path
+2. Multiply: `0.5 × 0.1 = 0.05`
+3. Output: `∂L/∂Z = 0.05` (0x000C in Q8.8)
+
+## Source files
+
+- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_parent.sv`
+- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_child.sv`

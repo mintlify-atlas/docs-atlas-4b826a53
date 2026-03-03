@@ -1,0 +1,305 @@
+---
+title: Instruction sequence examples
+description: Real-world instruction sequences for training neural networks on the Tiny TPU
+---
+
+This page shows actual instruction sequences from `test/test_tpu.py` that implement forward and backward propagation for a two-layer neural network.
+
+## Network architecture
+
+The test implements XOR learning with:
+
+- **Input layer**: 2 features
+- **Hidden layer**: 2 neurons with Leaky ReLU activation
+- **Output layer**: 1 neuron with Leaky ReLU activation
+- **Loss**: Mean Squared Error (MSE)
+- **Batch size**: 4 samples
+
+### Training data
+
+```python
+X = np.array([[0., 0.],
+              [0., 1.],
+              [1., 0.],
+              [1., 1.]])
+
+Y = np.array([0, 1, 1, 0])  # XOR truth table
+```
+
+### Initial parameters
+
+```python
+W1 = np.array([[0.2985, -0.5792], 
+               [0.0913, 0.4234]])
+B1 = [-0.4939, 0.189]
+
+W2 = np.array([0.5266, 0.2958])
+B2 = np.array([0.6358])
+
+learning_rate = 0.75
+leak_factor = 0.5
+```
+
+## Initialization sequence
+
+Before computation begins, configure global parameters:
+
+```python
+# Set learning rate (stays constant)
+dut.learning_rate_in.value = to_fixed(0.75)
+
+# Set Leaky ReLU leak factor
+dut.vpu_leak_factor_in.value = to_fixed(0.5)
+
+# Set batch scaling for MSE gradient: 2/batch_size = 2/4 = 0.5
+dut.inv_batch_size_times_two_in.value = to_fixed(2/len(X))
+```
+
+These parameters remain set throughout training and don't need to be included in each instruction.
+
+## Loading data into Unified Buffer
+
+Data is loaded using the dual-port write interface:
+
+```python
+# Load X matrix (4x2) - using both write channels
+for i in range(len(X) - 1):
+    dut.ub_wr_host_data_in[0].value = to_fixed(X[i + 1][0])
+    dut.ub_wr_host_valid_in[0].value = 1
+    dut.ub_wr_host_data_in[1].value = to_fixed(X[i][1])
+    dut.ub_wr_host_valid_in[1].value = 1
+    await RisingEdge(dut.clk)
+
+# Load Y vector (4x1) - using only channel 0
+for i in range(len(Y) - 1):
+    dut.ub_wr_host_data_in[0].value = to_fixed(Y[i + 1])
+    dut.ub_wr_host_valid_in[0].value = 1
+    dut.ub_wr_host_data_in[1].value = 0
+    dut.ub_wr_host_valid_in[1].value = 0
+    await RisingEdge(dut.clk)
+
+# Similarly load W1, B1, W2, B2...
+```
+
+**Instruction fields**:
+- `ub_wr_host_valid_in_1` [bit 3]: `1` when channel 0 has data
+- `ub_wr_host_valid_in_2` [bit 4]: `1` when channel 1 has data
+- `ub_wr_host_data_in_1` [35:20]: First data value
+- `ub_wr_host_data_in_2` [51:36]: Second data value
+
+## Forward pass - Layer 1: H1 = LeakyReLU(X @ W1^T + B1)
+
+### Step 1: Load W1^T into systolic array
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_rd_transpose.value = 1      # Transpose during read
+dut.ub_ptr_select.value = 1        # Route to systolic top (weights)
+dut.ub_rd_addr_in.value = 12       # W1 stored at address 12
+dut.ub_rd_row_size.value = 2
+dut.ub_rd_col_size.value = 2
+```
+
+**Instruction encoding** (88-bit):
+- Bit 1 (`ub_rd_start_in`): `1`
+- Bit 2 (`ub_rd_transpose`): `1`
+- Bits [6:5] (`ub_rd_col_size`): `10` (2 columns)
+- Bits [14:7] (`ub_rd_row_size`): `00000010` (2 rows)
+- Bits [16:15] (`ub_rd_addr_in`): Implementation specific
+- Bits [19:17] (`ub_ptr_sel`): `001` (systolic top)
+
+### Step 2: Load X and configure VPU for forward pass
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_rd_transpose.value = 0      # No transpose
+dut.ub_ptr_select.value = 0        # Route to systolic left (inputs)
+dut.ub_rd_addr_in.value = 0        # X stored at address 0
+dut.ub_rd_row_size.value = 4       # Batch size
+dut.ub_rd_col_size.value = 2
+dut.vpu_data_pathway.value = 0b1100  # Bias + Activation
+```
+
+**Key fields**:
+- Bits [55:52] (`vpu_data_pathway`): `1100` (forward pass routing)
+- Bits [14:7] (`ub_rd_row_size`): `00000100` (4 rows)
+
+### Step 3: Load B1 bias vector
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_rd_transpose.value = 0
+dut.ub_ptr_select.value = 2        # Route to VPU bias module
+dut.ub_rd_addr_in.value = 16       # B1 stored at address 16  
+dut.ub_rd_row_size.value = 4       # Repeat bias for batch
+dut.ub_rd_col_size.value = 2
+dut.sys_switch_in.value = 0
+```
+
+**Result**: Systolic array computes X @ W1^T, VPU adds B1 and applies Leaky ReLU. Output H1 written back to UB.
+
+## Forward pass - Layer 2: H2 = LeakyReLU(H1 @ W2^T + B2)
+
+### Step 1: Load W2^T into systolic array
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_rd_transpose.value = 1
+dut.ub_ptr_select.value = 1
+dut.ub_rd_addr_in.value = 18       # W2 at address 18
+dut.ub_rd_row_size.value = 1       # W2 is 1x2
+dut.ub_rd_col_size.value = 2
+```
+
+### Step 2: Load H1 and configure for loss computation
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 0
+dut.ub_rd_addr_in.value = 21       # H1 stored at address 21
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 2
+dut.vpu_data_pathway.value = 0b1111  # Bias + Activation + Loss
+```
+
+**Key difference**: `vpu_data_pathway = 0b1111` activates MSE loss module
+
+### Step 3: Load B2 bias
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 2        # VPU bias
+dut.ub_rd_addr_in.value = 20
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 1
+```
+
+### Step 4: Load target Y for loss
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 3        # VPU loss module
+dut.ub_rd_addr_in.value = 8        # Y at address 8
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 1
+```
+
+**Result**: Computes H2 and immediately calculates dL/dZ2 = (H2 - Y) × 2/batch_size
+
+## Backward pass - Layer 2: dL/dZ1 = dL/dZ2 @ W2 ⊙ ReLU'(Z1)
+
+### Step 1: Load W2 (not transposed)
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_rd_transpose.value = 0      # No transpose for backprop
+dut.ub_ptr_select.value = 1
+dut.ub_rd_addr_in.value = 18
+dut.ub_rd_row_size.value = 1
+dut.ub_rd_col_size.value = 2
+```
+
+### Step 2: Load dL/dZ2 gradient
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 0
+dut.ub_rd_addr_in.value = 29       # dL/dZ2 at address 29
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 1
+dut.vpu_data_pathway.value = 0b0001  # Activation derivative only
+```
+
+**Key field**: `vpu_data_pathway = 0b0001` for backpropagation through activation
+
+### Step 3: Load H1 for activation derivative
+
+```python
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 4        # VPU activation derivative
+dut.ub_rd_addr_in.value = 21
+dut.ub_rd_row_size.value = 4
+dut.ub_rd_col_size.value = 2
+```
+
+**Result**: Gradient propagated through layer 2, producing dL/dZ1
+
+## Weight gradient computation
+
+Weight gradients use tiled matrix multiplication with bypass mode.
+
+### Computing dL/dW1 (first tile)
+
+```python
+# Load first X tile into systolic top
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 1
+dut.ub_rd_addr_in.value = 0
+dut.ub_rd_row_size.value = 2       # Tile size
+dut.ub_rd_col_size.value = 2
+
+# Load first (dL/dZ1)^T tile into systolic left
+dut.ub_rd_start_in.value = 1
+dut.ub_rd_transpose.value = 1      # Transpose gradient
+dut.ub_ptr_select.value = 0
+dut.ub_rd_addr_in.value = 33
+dut.ub_rd_row_size.value = 2
+dut.ub_rd_col_size.value = 2
+dut.vpu_data_pathway.value = 0b0000  # Bypass - no VPU processing
+```
+
+**Key field**: `vpu_data_pathway = 0b0000` bypasses VPU for gradient accumulation
+
+### Gradient descent update
+
+```python
+# Route old weights to gradient descent
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = 6        # VPU gradient descent (weights)
+dut.ub_rd_addr_in.value = 12       # Current W1
+dut.ub_rd_row_size.value = 2
+dut.ub_rd_col_size.value = 2
+```
+
+**Result**: VPU gradient descent module computes W_new = W_old - learning_rate × dL/dW
+
+## Timing and synchronization
+
+Instructions follow this typical pattern:
+
+```python
+# Cycle 1: Assert start and configure
+dut.ub_rd_start_in.value = 1
+dut.ub_ptr_select.value = X
+# ... other config ...
+await RisingEdge(dut.clk)
+
+# Cycle 2: Clear start, operation continues
+dut.ub_rd_start_in.value = 0
+dut.ub_ptr_select.value = 0
+await RisingEdge(dut.clk)
+
+# Wait for completion
+await FallingEdge(dut.vpu_valid_out_1)
+```
+
+<Note>
+The `sys_switch_in` signal toggles during multi-cycle operations to control when the systolic array is actively shifting data.
+</Note>
+
+## Complete instruction count
+
+For one training iteration (forward + backward pass):
+
+- **Data loading**: ~12 instructions (dual-channel writes)
+- **Forward layer 1**: 3 read operations (W1, X, B1)
+- **Forward layer 2**: 4 read operations (W2, H1, B2, Y)
+- **Backward layer 2**: 3 read operations (W2, dL/dZ2, H1)
+- **Weight gradients**: 8 read operations (tiled computation for W1, W2)
+- **Gradient descent**: 4 read operations (update W1, B1, W2, B2)
+
+**Total**: ~34 instructions per training iteration
+
+<Tip>
+For the complete test sequence with all signal values, see `test/test_tpu.py:66-590` in the source repository.
+</Tip>

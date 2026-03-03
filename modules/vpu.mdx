@@ -1,0 +1,259 @@
+---
+title: VPU
+description: Vector Processing Unit for activation functions, loss computation, and derivatives
+---
+
+The Vector Processing Unit (VPU) is a configurable pipeline that applies activation functions, computes loss derivatives, and calculates activation derivatives. It supports three data pathways for forward pass, transition, and backward pass operations.
+
+## Module declaration
+
+```systemverilog
+module vpu (
+    input logic clk,
+    input logic rst,
+    input logic [3:0] vpu_data_pathway,
+    // Inputs from systolic array
+    input logic signed [15:0] vpu_data_in_1,
+    input logic signed [15:0] vpu_data_in_2,
+    input logic vpu_valid_in_1,
+    input logic vpu_valid_in_2,
+    // Inputs from unified buffer
+    input logic signed [15:0] bias_scalar_in_1,
+    input logic signed [15:0] bias_scalar_in_2,
+    input logic signed [15:0] lr_leak_factor_in,
+    input logic signed [15:0] Y_in_1,
+    input logic signed [15:0] Y_in_2,
+    input logic signed [15:0] inv_batch_size_times_two_in,
+    input logic signed [15:0] H_in_1,
+    input logic signed [15:0] H_in_2,
+    // Outputs to unified buffer
+    output logic signed [15:0] vpu_data_out_1,
+    output logic signed [15:0] vpu_data_out_2,
+    output logic vpu_valid_out_1,
+    output logic vpu_valid_out_2
+);
+```
+
+## Input ports
+
+### Systolic array inputs
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `vpu_data_in_1` | `signed [15:0]` | Data input from systolic array column 1 |
+| `vpu_data_in_2` | `signed [15:0]` | Data input from systolic array column 2 |
+| `vpu_valid_in_1` | 1 | Valid signal for column 1 |
+| `vpu_valid_in_2` | 1 | Valid signal for column 2 |
+
+### Unified buffer inputs
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `bias_scalar_in_1` | `signed [15:0]` | Bias value for column 1 |
+| `bias_scalar_in_2` | `signed [15:0]` | Bias value for column 2 |
+| `lr_leak_factor_in` | `signed [15:0]` | Leak factor α for leaky ReLU (Q8.8 format) |
+| `Y_in_1` | `signed [15:0]` | Ground truth label for loss computation (column 1) |
+| `Y_in_2` | `signed [15:0]` | Ground truth label for loss computation (column 2) |
+| `inv_batch_size_times_two_in` | `signed [15:0]` | Scaling factor: 1/(batch_size × 2) |
+| `H_in_1` | `signed [15:0]` | Cached activation value for derivative (column 1) |
+| `H_in_2` | `signed [15:0]` | Cached activation value for derivative (column 2) |
+
+### Control signal
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `vpu_data_pathway` | `[3:0]` | Module enable bits: `[bias|leaky_relu|loss|leaky_relu_derivative]` |
+
+## Output ports
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `vpu_data_out_1` | `signed [15:0]` | Processed data output for column 1 |
+| `vpu_data_out_2` | `signed [15:0]` | Processed data output for column 2 |
+| `vpu_valid_out_1` | 1 | Valid signal for column 1 output |
+| `vpu_valid_out_2` | 1 | Valid signal for column 2 output |
+
+## Architecture
+
+### Module pipeline
+
+The VPU consists of four processing stages:
+
+1. **Bias** (`bias_parent`): Adds bias to input values
+2. **Leaky ReLU** (`leaky_relu_parent`): Applies leaky ReLU activation
+3. **Loss** (`loss_parent`): Computes loss derivative (∂L/∂H)
+4. **Leaky ReLU Derivative** (`leaky_relu_derivative_parent`): Computes activation derivative
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:115-185:
+
+```systemverilog
+bias_parent bias_parent_inst (...);           // Z = X + b
+leaky_relu_parent leaky_relu_parent_inst (...); // H = LeakyReLU(Z)
+loss_parent loss_parent_inst (...);           // ∂L/∂H = (H - Y) / (batch_size × 2)
+leaky_relu_derivative_parent lr_d_inst (...); // ∂L/∂Z = ∂L/∂H ⊙ LeakyReLU'(H)
+```
+
+### Data pathways
+
+The `vpu_data_pathway` signal configures the active modules:
+
+<ParamField path="vpu_data_pathway[3]" type="bit">
+  Bias module enable (1 = enabled)
+</ParamField>
+
+<ParamField path="vpu_data_pathway[2]" type="bit">
+  Leaky ReLU module enable (1 = enabled)
+</ParamField>
+
+<ParamField path="vpu_data_pathway[1]" type="bit">
+  Loss module enable (1 = enabled)
+</ParamField>
+
+<ParamField path="vpu_data_pathway[0]" type="bit">
+  Leaky ReLU derivative module enable (1 = enabled)
+</ParamField>
+
+## Operation modes
+
+### Forward pass pathway (`4'b1100`)
+
+```
+Systolic Array → Bias → Leaky ReLU → Output
+```
+
+Computes: `H = LeakyReLU(Z)` where `Z = X + b`
+
+Use case: Hidden layer activations during forward propagation
+
+### Transition pathway (`4'b1111`)
+
+```
+Systolic Array → Bias → Leaky ReLU → Loss → Leaky ReLU Derivative → Output
+```
+
+Computes: `∂L/∂Z = (H - Y) / (batch_size × 2) ⊙ LeakyReLU'(H)`
+
+Use case: Final layer computation that transitions from forward to backward pass. The H matrix is cached internally for use in the derivative calculation.
+
+### Backward pass pathway (`4'b0001`)
+
+```
+Systolic Array → Leaky ReLU Derivative → Output
+```
+
+Computes: `∂L/∂Z = ∂L/∂H ⊙ LeakyReLU'(H)`
+
+Use case: Hidden layer gradients during backpropagation. H values come from `H_in_*` ports.
+
+### Inactive mode (`4'b0000`)
+
+All modules bypassed, no processing occurs.
+
+## Activation caching
+
+The VPU includes an internal cache for H matrices (activation outputs):
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:333-348:
+
+```systemverilog
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        last_H_data_1_out <= 0;
+        last_H_data_2_out <= 0;
+    end else begin
+        if (vpu_data_pathway[1]) begin  // Loss module enabled
+            last_H_data_1_out <= last_H_data_1_in;
+            last_H_data_2_out <= last_H_data_2_in;
+        end
+    end
+end
+```
+
+When the loss module is active (transition pathway), the leaky ReLU outputs are stored and used for the derivative calculation in the same pass.
+
+## Signal routing logic
+
+The VPU uses combinational logic to route signals through the enabled modules:
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:187-330:
+
+```systemverilog
+always @(*) begin
+    if(vpu_data_pathway[3]) begin      // Bias enabled
+        bias_data_1_in = vpu_data_in_1;
+        b_to_lr_data_in_1 = bias_z_data_out_1;
+    end else begin                     // Bias bypassed
+        b_to_lr_data_in_1 = vpu_data_in_1;
+    end
+    
+    if(vpu_data_pathway[2]) begin      // Leaky ReLU enabled
+        lr_data_1_in = b_to_lr_data_in_1;
+        lr_to_loss_data_in_1 = lr_data_1_out;
+    end else begin                     // Leaky ReLU bypassed
+        lr_to_loss_data_in_1 = b_to_lr_data_in_1;
+    end
+    
+    // Similar logic for loss and leaky_relu_derivative modules
+end
+```
+
+## Timing behavior
+
+- **Bias**: 1 clock cycle latency
+- **Leaky ReLU**: 1 clock cycle latency
+- **Loss**: 1 clock cycle latency
+- **Leaky ReLU Derivative**: 1 clock cycle latency
+
+Total latency depends on active pathway:
+- Forward pass: **2 cycles** (bias + leaky ReLU)
+- Transition: **4 cycles** (all modules)
+- Backward pass: **1 cycle** (leaky ReLU derivative only)
+
+## Example instantiation
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/tpu.sv:157-184:
+
+```systemverilog
+vpu vpu_inst (
+    .clk(clk),
+    .rst(rst),
+    .vpu_data_pathway(vpu_data_pathway),
+    
+    // From systolic array
+    .vpu_data_in_1(sys_data_out_21),
+    .vpu_data_in_2(sys_data_out_22),
+    .vpu_valid_in_1(sys_valid_out_21),
+    .vpu_valid_in_2(sys_valid_out_22),
+    
+    // From unified buffer
+    .bias_scalar_in_1(ub_rd_bias_data_out_0),
+    .bias_scalar_in_2(ub_rd_bias_data_out_1),
+    .lr_leak_factor_in(vpu_leak_factor_in),
+    .Y_in_1(ub_rd_Y_data_out_0),
+    .Y_in_2(ub_rd_Y_data_out_1),
+    .inv_batch_size_times_two_in(inv_batch_size_times_two_in),
+    .H_in_1(ub_rd_H_data_out_0),
+    .H_in_2(ub_rd_H_data_out_1),
+    
+    // To unified buffer
+    .vpu_data_out_1(vpu_data_out_1),
+    .vpu_data_out_2(vpu_data_out_2),
+    .vpu_valid_out_1(vpu_valid_out_1),
+    .vpu_valid_out_2(vpu_valid_out_2)
+);
+```
+
+## Related modules
+
+- [TPU](/modules/tpu) - Top-level integration
+- [Unified Buffer](/modules/unified-buffer) - Data source and destination
+- Bias parent (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_parent.sv)
+- Leaky ReLU parent (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_parent.sv)
+- Loss parent (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_parent.sv)
+- Leaky ReLU derivative parent (~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_parent.sv)
+
+## Testing
+
+See test files:
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/dump_vpu.sv - Waveform dump configuration
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/test_vpu.py - Python test suite

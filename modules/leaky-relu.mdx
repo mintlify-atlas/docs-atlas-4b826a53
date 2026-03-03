@@ -1,0 +1,185 @@
+---
+title: Leaky ReLU module
+description: Apply leaky ReLU activation function in the VPU forward pass
+---
+
+The leaky ReLU module applies the leaky rectified linear unit activation function to pre-activation values during the forward pass. This non-linear activation allows the network to learn complex patterns while mitigating the dying ReLU problem.
+
+## Architecture
+
+The leaky ReLU module uses a parent-child hierarchy:
+
+- **leaky_relu_parent**: Top-level module instantiating two leaky_relu_child modules
+- **leaky_relu_child**: Individual processing unit applying activation to one feature column
+
+The dual-column design enables parallel processing of two activation values per cycle, matching the VPU's 2x2 systolic array configuration.
+
+## Module ports
+
+### leaky_relu_parent
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="lr_leak_factor_in" type="input logic signed [15:0]">
+  Leak factor (α) for negative inputs, shared across both columns
+</ParamField>
+
+<ParamField path="lr_valid_1_in" type="input logic">
+  Valid signal for column 1 input data
+</ParamField>
+
+<ParamField path="lr_valid_2_in" type="input logic">
+  Valid signal for column 2 input data
+</ParamField>
+
+<ParamField path="lr_data_1_in" type="input logic signed [15:0]">
+  Pre-activation input for column 1
+</ParamField>
+
+<ParamField path="lr_data_2_in" type="input logic signed [15:0]">
+  Pre-activation input for column 2
+</ParamField>
+
+<ParamField path="lr_data_1_out" type="output logic signed [15:0]">
+  Activated output for column 1
+</ParamField>
+
+<ParamField path="lr_data_2_out" type="output logic signed [15:0]">
+  Activated output for column 2
+</ParamField>
+
+<ParamField path="lr_valid_1_out" type="output logic">
+  Valid signal for column 1 output
+</ParamField>
+
+<ParamField path="lr_valid_2_out" type="output logic">
+  Valid signal for column 2 output
+</ParamField>
+
+### leaky_relu_child
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="lr_valid_in" type="input logic">
+  Valid signal for input data
+</ParamField>
+
+<ParamField path="lr_data_in" type="input logic signed [15:0]">
+  Pre-activation input value
+</ParamField>
+
+<ParamField path="lr_leak_factor_in" type="input logic signed [15:0]">
+  Leak factor (α) for negative inputs
+</ParamField>
+
+<ParamField path="lr_data_out" type="output logic signed [15:0]">
+  Activated output value
+</ParamField>
+
+<ParamField path="lr_valid_out" type="output logic">
+  Output valid signal
+</ParamField>
+
+## Activation function
+
+The leaky ReLU function is defined as:
+
+```
+f(x) = { x      if x ≥ 0
+       { α·x    if x < 0
+```
+
+Where **α** (leak factor) is a small positive constant (typically 0.01 to 0.3) that allows a small gradient to flow through negative values, preventing neurons from "dying" during training.
+
+## Operation
+
+### Pipeline stages
+
+1. **Sign detection**: Check if input is non-negative (combinational)
+2. **Conditional computation**: 
+   - If `lr_data_in >= 0`: Pass through unchanged
+   - If `lr_data_in < 0`: Multiply by leak factor using `fxp_mul`
+3. **Registered output**: On clock edge, output the result with valid signal
+
+### Fixed-point arithmetic
+
+The module uses 16-bit signed fixed-point representation (Q8.8 format). For negative inputs, the `fxp_mul` module performs:
+- Fixed-point multiplication: `result = input × leak_factor`
+- Proper handling of binary point positioning
+- Overflow detection and saturation
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278` for the `fxp_mul` implementation.
+
+### Leak factor
+
+The leak factor is:
+- Stored in the unified buffer as a 16-bit fixed-point value
+- Shared across both columns (same α for all activations in a layer)
+- Typically set to small values like 0.01 (represented as 0x0028 in Q8.8)
+- Remains constant throughout the forward pass for a layer
+
+## Integration with VPU
+
+The leaky ReLU module is active during forward pass and transition pathways:
+
+- **Pathway 1100** (forward pass): `systolic → bias → leaky_relu → output`
+- **Pathway 1111** (transition): `systolic → bias → leaky_relu → loss → leaky_relu_derivative → output`
+
+When `vpu_data_pathway[2]` is set to 1:
+- Bias module outputs route to leaky ReLU inputs
+- Leak factor is provided from unified buffer
+- Leaky ReLU outputs proceed to next stage or final output
+- Activated values (H matrix) are cached when transitioning to backward pass
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:240-265` for the leaky ReLU routing logic.
+
+## Data flow
+
+```
+Bias Module (Z = X·W + b)
+         |
+         v
+[leaky_relu_child] <-- Leak Factor (α) from UB
+         |
+         v
+   Activation H
+         |
+         +---> Output (forward pass)
+         |
+         +---> Loss Module (transition)
+         |
+         +---> Cached for backward pass
+```
+
+## Implementation details
+
+- **Latency**: 1 clock cycle (registered output)
+- **Throughput**: 2 activations per cycle
+- **Comparison operation**: Uses sign bit check (`lr_data_in >= 0`)
+- **Multiplication**: Combinational fixed-point multiply for negative path
+- **Reset behavior**: Outputs cleared to zero, valid signals deasserted
+- **Zero handling**: Zero is treated as non-negative (passes through)
+
+## Advantages of leaky ReLU
+
+1. **Prevents dying neurons**: Unlike standard ReLU, neurons with negative inputs still propagate gradients
+2. **Simple hardware**: Only requires one comparator and one multiplier per processing unit
+3. **No saturation**: Function is unbounded on both positive and negative sides
+4. **Efficient gradient**: Derivative is constant (either 1 or α), enabling fast backward pass computation
+
+## Source files
+
+- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_parent.sv`
+- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_child.sv`

@@ -1,0 +1,310 @@
+---
+title: Testing framework and running tests
+description: Learn how to write and run tests for Tiny TPU using cocotb and iverilog
+---
+
+Tiny TPU uses [cocotb](https://www.cocotb.org/) (Coroutine Cosimulation TestBench) for hardware verification. Tests are written in Python and run against iverilog simulations.
+
+## Testing framework
+
+### Cocotb overview
+
+Cocotb allows you to write hardware tests in Python, providing:
+- Asynchronous test execution with `async`/`await`
+- Clock generation and synchronization
+- Signal manipulation and monitoring
+- Assertion-based testing
+- VCD waveform generation
+
+### Fixed-point helpers
+
+All Tiny TPU modules use Q8.8 fixed-point format (8 integer bits, 8 fractional bits). Tests include helper functions for conversion:
+
+```python
+def to_fixed(val, frac_bits=8):
+    """Convert floating-point to fixed-point representation."""
+    return int(round(val * (1 << frac_bits))) & 0xFFFF
+
+def from_fixed(val, frac_bits=8):
+    """Convert fixed-point to floating-point representation."""
+    if val >= (1 << 15):
+        val -= (1 << 16)
+    return float(val) / (1 << frac_bits)
+```
+
+## Running tests
+
+### Run a specific test
+
+To run tests for a specific module:
+
+```bash
+make test_<MODULE_NAME>
+```
+
+### Available test targets
+
+The Makefile includes test targets for all modules:
+
+<CodeGroup>
+
+```bash Core modules
+# Processing Element
+make test_pe
+
+# Systolic Array
+make test_systolic
+
+# Vector Processing Unit
+make test_vpu
+
+# Full TPU
+make test_tpu
+```
+
+```bash VPU components
+# Bias modules
+make test_bias_child
+make test_bias_parent
+
+# Leaky ReLU modules
+make test_leaky_relu_child
+make test_leaky_relu_parent
+
+# Leaky ReLU derivative
+make test_leaky_relu_derivative_child
+make test_leaky_relu_derivative_parent
+
+# Loss modules
+make test_loss_child
+make test_loss_parent
+```
+
+```bash Other modules
+# Control Unit
+make test_cu
+
+# Unified Buffer
+make test_unified_buffer
+
+# Gradient Descent
+make test_gradient_descent
+```
+
+</CodeGroup>
+
+### Test execution flow
+
+When you run `make test_<MODULE_NAME>`, the following happens:
+
+<Steps>
+  <Step title="Compilation">
+    iverilog compiles the module and all dependencies:
+    
+    ```bash
+    iverilog -o sim_build/sim.vvp -s <MODULE_NAME> -s dump -g2012 $(SOURCES) test/dump_<MODULE_NAME>.sv
+    ```
+    
+    - `-s <MODULE_NAME>` specifies the top-level module
+    - `-s dump` includes the dump module for VCD generation
+    - `-g2012` enables SystemVerilog 2012 features
+  </Step>
+
+  <Step title="Simulation">
+    VVP (the iverilog runtime) executes the simulation with cocotb:
+    
+    ```bash
+    MODULE=test_<MODULE_NAME> vvp -M <cocotb_libs> -m libcocotbvpi_icarus sim_build/sim.vvp
+    ```
+    
+    - `MODULE=test_<MODULE_NAME>` specifies which Python test file to run
+    - Cocotb loads as a VPI plugin to iverilog
+  </Step>
+
+  <Step title="Result checking">
+    The test checks for failures in the generated XML report:
+    
+    ```bash
+    ! grep failure results.xml
+    ```
+    
+    If this command finds "failure", the test fails.
+  </Step>
+
+  <Step title="Waveform generation">
+    The VCD file is moved to the waveforms directory:
+    
+    ```bash
+    mv <MODULE_NAME>.vcd waveforms/
+    ```
+  </Step>
+</Steps>
+
+## Writing tests
+
+### Basic test structure
+
+Here's a complete example test for a processing element:
+
+```python test/test_pe.py
+import cocotb
+from cocotb.clock import Clock
+from cocotb.triggers import RisingEdge, ClockCycles
+
+def to_fixed(val, frac_bits=8):
+    return int(round(val * (1 << frac_bits))) & 0xFFFF
+
+def from_fixed(val, frac_bits=8):
+    if val >= (1 << 15):
+        val -= (1 << 16)
+    return float(val) / (1 << frac_bits)
+
+@cocotb.test()
+async def test_pe(dut):
+    """Test the PE module with fixed-point inputs."""
+    
+    # Create and start clock (10ns period)
+    clock = Clock(dut.clk, 10, units="ns")
+    cocotb.start_soon(clock.start())
+    
+    # Reset the module
+    dut.rst.value = 1
+    dut.pe_valid_in.value = 0
+    dut.pe_accept_w_in.value = 0
+    dut.pe_input_in.value = to_fixed(0.0)
+    dut.pe_weight_in.value = to_fixed(0.0)
+    dut.pe_psum_in.value = to_fixed(0.0)
+    await RisingEdge(dut.clk)
+    
+    # Release reset
+    dut.rst.value = 0
+    await RisingEdge(dut.clk)
+    
+    # Load weights
+    dut.pe_accept_w_in.value = 1
+    dut.pe_weight_in.value = to_fixed(2.5)
+    await RisingEdge(dut.clk)
+    
+    # Switch to computation mode
+    dut.pe_accept_w_in.value = 0
+    dut.pe_switch_in.value = 1
+    dut.pe_valid_in.value = 1
+    dut.pe_input_in.value = to_fixed(3.0)
+    dut.pe_psum_in.value = to_fixed(1.0)
+    await RisingEdge(dut.clk)
+    
+    # Wait for computation
+    await ClockCycles(dut.clk, 3)
+    
+    # Check output (expected: 3.0 * 2.5 + 1.0 = 8.5)
+    output = from_fixed(dut.pe_psum_out.value)
+    assert abs(output - 8.5) < 0.01, f"Expected 8.5, got {output}"
+```
+
+### Key testing patterns
+
+<AccordionGroup>
+  <Accordion title="Clock generation">
+    Always create a clock at the start of your test:
+    
+    ```python
+    clock = Clock(dut.clk, 10, units="ns")
+    cocotb.start_soon(clock.start())
+    ```
+    
+    This creates a 10ns period clock (100MHz).
+  </Accordion>
+
+  <Accordion title="Reset sequence">
+    Always reset your module before testing:
+    
+    ```python
+    dut.rst.value = 1
+    # Set all inputs to known values
+    await RisingEdge(dut.clk)
+    dut.rst.value = 0
+    await RisingEdge(dut.clk)
+    ```
+  </Accordion>
+
+  <Accordion title="Synchronization">
+    Use triggers to synchronize with the clock:
+    
+    ```python
+    # Wait for one clock edge
+    await RisingEdge(dut.clk)
+    
+    # Wait for multiple cycles
+    await ClockCycles(dut.clk, 5)
+    ```
+  </Accordion>
+
+  <Accordion title="Assertions">
+    Use Python assertions to verify behavior:
+    
+    ```python
+    assert dut.output.value == expected_value
+    assert abs(float_output - expected) < tolerance
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Test organization
+
+All test files are located in the `test/` directory:
+
+```
+test/
+├── test_pe.py                          # Processing Element tests
+├── test_systolic.py                    # Systolic Array tests
+├── test_vpu.py                         # VPU tests
+├── test_tpu.py                         # Full TPU tests
+├── test_unified_buffer.py              # Memory tests
+├── test_bias_parent.py                 # Bias module tests
+├── test_leaky_relu_parent.py           # Activation tests
+├── test_leaky_relu_derivative_parent.py # Derivative tests
+├── test_loss_parent.py                 # Loss function tests
+└── test_gradient_descent.py            # Gradient descent tests
+```
+
+Each test file includes:
+- Helper functions for fixed-point conversion
+- One or more `@cocotb.test()` decorated functions
+- Comprehensive test cases covering various scenarios
+
+## Debugging failed tests
+
+If a test fails:
+
+1. **Check the console output** - Cocotb prints detailed error messages
+2. **Review results.xml** - Contains detailed test results
+3. **View the waveforms** - See [waveforms guide](/development/waveforms)
+4. **Add debug prints** - Use `dut._log.info()` in your test
+
+```python
+# Add logging to your test
+dut._log.info(f"Output value: {dut.output.value}")
+dut._log.info(f"Expected: {expected}, Got: {actual}")
+```
+
+## Continuous integration
+
+The test suite can be run automatically in CI/CD pipelines. The tests exit with:
+- Exit code 0 on success
+- Non-zero exit code on failure
+
+```bash
+# Run all tests in a script
+make test_pe && make test_systolic && make test_tpu
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Waveforms" icon="wave-square" href="/development/waveforms">
+    Learn how to view and analyze test waveforms
+  </Card>
+  <Card title="Adding modules" icon="plus" href="/development/adding-modules">
+    Add new modules with proper tests
+  </Card>
+</CardGroup>

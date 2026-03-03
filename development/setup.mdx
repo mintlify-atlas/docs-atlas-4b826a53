@@ -1,0 +1,117 @@
+---
+title: Development environment setup
+description: Set up your development environment for Tiny TPU on MacOS or Ubuntu/Linux
+---
+
+This guide will walk you through setting up your development environment for Tiny TPU. The project uses cocotb for testing, iverilog for simulation, and GTKwave for viewing waveforms.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+- Python 3.7 or later
+- Git (for version control)
+- A package manager (Homebrew for MacOS, apt for Ubuntu/Linux)
+
+## Platform-specific setup
+
+<CodeGroup>
+
+```bash MacOS
+# Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install cocotb
+pip install cocotb
+
+# Install iverilog using Homebrew
+brew install iverilog
+```
+
+```bash Ubuntu/Linux
+# Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install cocotb
+pip install cocotb
+
+# Install GTKwave
+sudo apt install gtkwave
+
+# Install iverilog
+sudo apt install iverilog
+```
+
+</CodeGroup>
+
+## GTKwave installation
+
+<Warning>
+  On MacOS, you must build GTKwave from source. Other installation methods (like Homebrew) do not currently work correctly.
+</Warning>
+
+### Building GTKwave from source (MacOS only)
+
+<Steps>
+  <Step title="Download GTKwave source">
+    Visit the [GTKwave website](http://gtkwave.sourceforge.net/) or GitHub repository to download the latest source code.
+  </Step>
+  
+  <Step title="Build and install">
+    Follow the build instructions provided in the GTKwave source distribution.
+  </Step>
+  
+  <Step title="Verify installation">
+    ```bash
+    gtkwave --version
+    ```
+  </Step>
+</Steps>
+
+### Installing GTKwave (Ubuntu/Linux)
+
+On Ubuntu/Linux, GTKwave can be installed directly from the package manager:
+
+```bash
+sudo apt install gtkwave
+```
+
+## Verify your installation
+
+After completing the setup, verify that all tools are installed correctly:
+
+```bash
+# Check cocotb
+python -c "import cocotb; print(cocotb.__version__)"
+
+# Check iverilog
+iverilog -v
+
+# Check GTKwave
+gtkwave --version
+```
+
+## Project structure
+
+Once your environment is set up, familiarize yourself with the project structure:
+
+- `src/` - SystemVerilog source files for all modules
+- `test/` - Cocotb test files and dump modules
+- `waveforms/` - Generated VCD waveform files
+- `sim_build/` - Simulation build artifacts
+- `Makefile` - Build and test automation
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Adding modules" icon="plus" href="/development/adding-modules">
+    Learn how to add new modules to the Tiny TPU
+  </Card>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Understand the testing framework and workflow
+  </Card>
+  <Card title="Waveforms" icon="wave-square" href="/development/waveforms">
+    View and analyze waveforms with GTKwave
+  </Card>
+</CardGroup>

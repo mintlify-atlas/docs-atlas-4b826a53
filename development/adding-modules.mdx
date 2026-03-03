@@ -1,0 +1,204 @@
+---
+title: How to add new modules
+description: Step-by-step guide to adding new hardware modules to Tiny TPU
+---
+
+This guide walks you through the process of adding a new hardware module to the Tiny TPU project, including creating the module, tests, and integrating with the build system.
+
+## Overview
+
+Adding a new module involves five main steps:
+1. Create the SystemVerilog module file
+2. Create a dump file for waveform generation
+3. Write cocotb tests
+4. Update the Makefile
+5. Run tests and view waveforms
+
+## Step-by-step process
+
+<Steps>
+  <Step title="Create the module file">
+    Create your new SystemVerilog module in the `src/` directory:
+
+    ```bash
+    touch src/<MODULE_NAME>.sv
+    ```
+
+    Implement your module following the existing code style and conventions in the codebase. Ensure your module:
+    - Has clear input/output port definitions
+    - Includes proper reset logic
+    - Uses the fixed-point format (Q8.8) where applicable
+    - Follows SystemVerilog 2012 syntax
+  </Step>
+
+  <Step title="Create the dump file">
+    Create a dump file in the `test/` directory to generate VCD waveforms:
+
+    ```systemverilog test/dump_<MODULE_NAME>.sv
+    module dump();
+    initial begin
+      $dumpfile("waveforms/<MODULE_NAME>.vcd");
+      $dumpvars(0, <MODULE_NAME>);
+    end
+    endmodule
+    ```
+
+    This file instructs iverilog to dump all signals from your module to a VCD file for visualization.
+  </Step>
+
+  <Step title="Create the test file">
+    Create a cocotb test file in the `test/` directory:
+
+    ```bash
+    touch test/test_<MODULE_NAME>.py
+    ```
+
+    Write your tests using cocotb. Here's a basic template:
+
+    ```python test/test_<MODULE_NAME>.py
+    import cocotb
+    from cocotb.clock import Clock
+    from cocotb.triggers import RisingEdge, ClockCycles
+
+    def to_fixed(val, frac_bits=8):
+        return int(round(val * (1 << frac_bits))) & 0xFFFF
+
+    def from_fixed(val, frac_bits=8):
+        if val >= (1 << 15):
+            val -= (1 << 16)
+        return float(val) / (1 << frac_bits)
+
+    @cocotb.test()
+    async def test_<MODULE_NAME>(dut):
+        """Test your module."""
+        
+        # Create clock
+        clock = Clock(dut.clk, 10, units="ns")
+        cocotb.start_soon(clock.start())
+        
+        # Reset
+        dut.rst.value = 1
+        await RisingEdge(dut.clk)
+        dut.rst.value = 0
+        await RisingEdge(dut.clk)
+        
+        # Your test logic here
+        # ...
+    ```
+
+    <Tip>
+      Look at existing test files like `test/test_pe.py` for examples of comprehensive testing patterns.
+    </Tip>
+  </Step>
+
+  <Step title="Update the Makefile">
+    Add your module to the build system by editing the `Makefile`:
+
+    **1. Add to SOURCES variable:**
+
+    ```makefile Makefile
+    SOURCES = src/pe.sv \
+              src/systolic.sv \
+              src/<MODULE_NAME>.sv \
+              # ... other sources
+    ```
+
+    **2. Create a test target:**
+
+    ```makefile Makefile
+    test_<MODULE_NAME>: $(SIM_BUILD_DIR)
+    	$(IVERILOG) -o $(SIM_VVP) -s <MODULE_NAME> -s dump -g2012 $(SOURCES) test/dump_<MODULE_NAME>.sv
+    	PYTHONOPTIMIZE=$(NOASSERT) MODULE=test_<MODULE_NAME> $(VVP) -M $(COCOTB_LIBS) -m libcocotbvpi_icarus $(SIM_VVP)
+    	! grep failure results.xml
+    	mv <MODULE_NAME>.vcd waveforms/ 2>/dev/null || true
+    ```
+
+    <Note>
+      Make sure to use tabs (not spaces) for indentation in Makefile targets.
+    </Note>
+  </Step>
+
+  <Step title="Run the test">
+    Build and test your new module:
+
+    ```bash
+    make test_<MODULE_NAME>
+    ```
+
+    The test will:
+    - Compile your module with iverilog
+    - Run the cocotb test
+    - Generate a VCD waveform file
+    - Check for test failures in `results.xml`
+  </Step>
+
+  <Step title="View waveforms">
+    After the test completes successfully, view the generated waveforms:
+
+    ```bash
+    gtkwave waveforms/<MODULE_NAME>.vcd
+    ```
+
+    Or use the Makefile shorthand:
+
+    ```bash
+    make show_<MODULE_NAME>
+    ```
+
+    See the [waveforms guide](/development/waveforms) for tips on configuring GTKwave for fixed-point viewing.
+  </Step>
+</Steps>
+
+## Example modules
+
+Here are some existing modules you can reference:
+
+- `src/pe.sv` - Processing Element (simple module)
+- `src/systolic.sv` - Systolic Array (complex module with multiple instances)
+- `src/vpu.sv` - Vector Processing Unit (module with sub-components)
+- `src/unified_buffer.sv` - Unified Buffer (memory module)
+
+## Best practices
+
+<AccordionGroup>
+  <Accordion title="Use fixed-point arithmetic">
+    All arithmetic in Tiny TPU uses Q8.8 fixed-point format (8 integer bits, 8 fractional bits). Use the helper functions in tests:
+    
+    - `to_fixed(val)` - Convert float to fixed-point
+    - `from_fixed(val)` - Convert fixed-point to float
+  </Accordion>
+
+  <Accordion title="Include comprehensive tests">
+    Write tests that cover:
+    - Normal operation
+    - Edge cases (zero, negative, maximum values)
+    - Reset behavior
+    - Pipeline stages and timing
+  </Accordion>
+
+  <Accordion title="Follow naming conventions">
+    - Module files: `<module_name>.sv`
+    - Test files: `test_<module_name>.py`
+    - Dump files: `dump_<module_name>.sv`
+    - Makefile targets: `test_<module_name>`
+  </Accordion>
+
+  <Accordion title="Document your module">
+    Add comments in your SystemVerilog code explaining:
+    - Module purpose and function
+    - Port descriptions
+    - Pipeline stages
+    - Timing requirements
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/development/testing">
+    Learn more about the testing framework
+  </Card>
+  <Card title="Waveforms" icon="wave-square" href="/development/waveforms">
+    Configure GTKwave for better visualization
+  </Card>
+</CardGroup>

@@ -1,0 +1,142 @@
+---
+title: TPU
+description: Top-level Tensor Processing Unit module that integrates all core components
+---
+
+The `tpu` module is the top-level module that integrates the systolic array, unified buffer, and vector processing unit into a complete tensor processing unit. It orchestrates data flow between all components and provides a unified interface for host interaction.
+
+## Module declaration
+
+```systemverilog
+module tpu #(
+    parameter int SYSTOLIC_ARRAY_WIDTH = 2
+)(
+    input logic clk,
+    input logic rst,
+    // ... ports
+);
+```
+
+## Parameters
+
+<ParamField path="SYSTOLIC_ARRAY_WIDTH" type="int" default="2">
+  Width of the systolic array (number of processing elements per row/column)
+</ParamField>
+
+## Input ports
+
+### Unified buffer write ports (host to UB)
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_wr_host_data_in` | `[15:0] [0:SYSTOLIC_ARRAY_WIDTH-1]` | Data input from host to unified buffer |
+| `ub_wr_host_valid_in` | `[0:SYSTOLIC_ARRAY_WIDTH-1]` | Valid signal for host data writes |
+
+### Unified buffer read control
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `ub_rd_start_in` | 1 | Start signal for unified buffer read operation |
+| `ub_rd_transpose` | 1 | Transpose flag for matrix reading |
+| `ub_ptr_select` | `[8:0]` | Pointer selector for different buffer regions (0=input, 1=weight, 2=bias, 3=Y, 4=H, 5=grad_bias, 6=grad_weight) |
+| `ub_rd_addr_in` | `[15:0]` | Starting address for read operation |
+| `ub_rd_row_size` | `[15:0]` | Number of rows to read |
+| `ub_rd_col_size` | `[15:0]` | Number of columns to read |
+
+### Training parameters
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `learning_rate_in` | `[15:0]` | Learning rate for gradient descent (Q8.8 fixed-point) |
+
+### VPU control
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `vpu_data_pathway` | `[3:0]` | 4-bit pathway selector: `[bias|leaky_relu|loss|leaky_relu_derivative]` |
+| `vpu_leak_factor_in` | `[15:0]` | Leak factor for leaky ReLU activation |
+| `inv_batch_size_times_two_in` | `[15:0]` | Inverse batch size × 2 for loss calculation |
+
+### Systolic array control
+
+| Port | Width | Description |
+|------|-------|-------------|
+| `sys_switch_in` | 1 | Switch signal to copy weights from shadow to active buffer |
+
+## Architecture
+
+### Component instantiation
+
+The TPU module instantiates three major components:
+
+1. **Unified Buffer** (`unified_buffer`): Central memory for weights, activations, and gradients
+2. **Systolic Array** (`systolic`): 2×2 array of processing elements for matrix multiplication
+3. **Vector Processing Unit** (`vpu`): Pipeline of activation, loss, and derivative modules
+
+### Signal flow
+
+```
+Host → Unified Buffer → Systolic Array → VPU → Unified Buffer
+                ↑                                      ↓
+                └──────────────────────────────────────┘
+```
+
+1. Host loads parameters (weights, biases) into unified buffer via `ub_wr_host_*` ports
+2. Unified buffer feeds inputs and weights to systolic array
+3. Systolic array performs matrix multiplication and outputs to VPU
+4. VPU applies activations, computes loss, or calculates derivatives
+5. VPU writes results back to unified buffer for next layer or gradient updates
+
+### Data pathways
+
+The `vpu_data_pathway` control signal selects the operation mode:
+
+- `4'b1100`: Forward pass (systolic → bias → leaky ReLU → output)
+- `4'b1111`: Transition (systolic → bias → leaky ReLU → loss → leaky ReLU derivative → output)
+- `4'b0001`: Backward pass (systolic → leaky ReLU derivative → output)
+- `4'b0000`: No modules activated
+
+## Example instantiation
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/tpu.sv:77-128:
+
+```systemverilog
+unified_buffer #(
+    .SYSTOLIC_ARRAY_WIDTH(SYSTOLIC_ARRAY_WIDTH)
+) ub_inst(
+    .clk(clk),
+    .rst(rst),
+    .ub_wr_data_in(ub_wr_data_in),
+    .ub_wr_valid_in(ub_wr_valid_in),
+    .ub_wr_host_data_in(ub_wr_host_data_in),
+    .ub_wr_host_valid_in(ub_wr_host_valid_in),
+    // ... additional ports
+);
+
+systolic systolic_inst (
+    .clk(clk),
+    .rst(rst),
+    .sys_data_in_11(ub_rd_input_data_out_0),
+    .sys_data_in_21(ub_rd_input_data_out_1),
+    // ... additional ports
+);
+
+vpu vpu_inst (
+    .clk(clk),
+    .rst(rst),
+    .vpu_data_pathway(vpu_data_pathway),
+    // ... additional ports
+);
+```
+
+## Related modules
+
+- [Unified Buffer](/modules/unified-buffer) - Memory management
+- [Systolic Array](/modules/systolic) - Matrix multiplication engine
+- [VPU](/modules/vpu) - Activation and loss computation
+
+## Testing
+
+See test files:
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/dump_tpu.sv - Waveform dump configuration
+- ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/test/test_tpu.py - Python test suite

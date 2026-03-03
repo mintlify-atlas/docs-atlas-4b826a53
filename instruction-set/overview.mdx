@@ -1,0 +1,69 @@
+---
+title: Instruction set overview
+description: Understanding the Tiny TPU 88-bit instruction format and architecture
+---
+
+The Tiny TPU uses a fixed-width instruction set architecture (ISA) to control all subsystems including the Unified Buffer, Systolic Array, and Vector Processing Unit.
+
+## Instruction format
+
+The instruction bus is **88 bits wide** (`[87:0]`) and divided into fields that directly control TPU subsystems. Each field maps to specific control signals or data values.
+
+<Note>
+The README documentation references a 94-bit instruction format, but the actual hardware implementation in `src/control_unit.sv` uses 88 bits. This documentation reflects the implemented 88-bit format.
+</Note>
+
+## Instruction field layout
+
+Instructions are organized into sequential bit fields, each serving a specific control purpose:
+
+| Bit range | Width | Field | Purpose |
+|-----------|-------|-------|--------|
+| `[0:4]` | 5 bits | Control signals | System-wide 1-bit control flags |
+| `[6:5]` | 2 bits | Column size | UB read column count |
+| `[14:7]` | 8 bits | Row size | UB read row count (0-255) |
+| `[16:15]` | 2 bits | Read address | UB read address pointer |
+| `[19:17]` | 3 bits | Pointer select | UB data routing selector |
+| `[35:20]` | 16 bits | Host data 1 | First host write data word |
+| `[51:36]` | 16 bits | Host data 2 | Second host write data word |
+| `[55:52]` | 4 bits | Data pathway | VPU pipeline configuration |
+| `[71:56]` | 16 bits | Batch scaling | Inverse batch size × 2 factor |
+| `[87:72]` | 16 bits | Leak factor | Activation function leak parameter |
+
+## Fixed-point representation
+
+Data fields use 16-bit fixed-point format with 8 fractional bits:
+
+- **Format**: Q8.8 (8 integer bits, 8 fractional bits)
+- **Range**: -128.0 to 127.99609375
+- **Precision**: 1/256 ≈ 0.00390625
+
+This format is used for:
+- Host write data (`ub_wr_host_data_in_1`, `ub_wr_host_data_in_2`)
+- Batch size scaling factor (`inv_batch_size_times_two_in`)
+- Activation leak factor (`vpu_leak_factor_in`)
+
+## Control flow
+
+Instructions are loaded directly into an on-chip instruction buffer. The control unit decodes each instruction and asserts the appropriate signals to coordinate:
+
+1. **Data movement** - Reading from and writing to the Unified Buffer
+2. **Computation** - Configuring the systolic array and VPU pipeline
+3. **Synchronization** - Managing valid/ready handshakes between modules
+
+<Card title="Related" icon="book" href="/instruction-set/control-signals">
+See the complete control signal reference for detailed signal descriptions
+</Card>
+
+## Instruction execution model
+
+The TPU follows a simple execution model:
+
+- Instructions execute in program order
+- Most operations complete in one clock cycle
+- Data transfers may take multiple cycles depending on size parameters
+- No instruction-level parallelism or out-of-order execution
+
+<Tip>
+For real-world instruction sequences, see the [examples page](/instruction-set/examples) which shows forward and backward pass implementations.
+</Tip>

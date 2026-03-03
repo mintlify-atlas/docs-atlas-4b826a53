@@ -1,0 +1,322 @@
+---
+title: Systolic array
+description: Architecture of the 2D processing element grid
+---
+
+The systolic array is a 2D grid of processing elements arranged to perform efficient matrix multiplication. Data flows rhythmically through the array in a systolic pattern, similar to how blood flows through the heart.
+
+## Module interface
+
+```systemverilog
+module systolic #(
+    parameter int SYSTOLIC_ARRAY_WIDTH = 2
+)(
+    input logic clk,
+    input logic rst,
+
+    // Input signals from left side of systolic array
+    input logic [15:0] sys_data_in_11,
+    input logic [15:0] sys_data_in_21,
+    input logic sys_start,    // start signal
+
+    output logic [15:0] sys_data_out_21,
+    output logic [15:0] sys_data_out_22,
+    output wire sys_valid_out_21,
+    output wire sys_valid_out_22,
+
+    // Input signals from top of systolic array
+    input logic [15:0] sys_weight_in_11,
+    input logic [15:0] sys_weight_in_12,
+    input logic sys_accept_w_1,   // accept weight column 1
+    input logic sys_accept_w_2,   // accept weight column 2
+
+    input logic sys_switch_in,    // switch signal
+
+    input logic [15:0] ub_rd_col_size_in,
+    input logic ub_rd_col_size_valid_in
+);
+```
+
+Source: [systolic.sv:5-31](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L5-L31)
+
+## Array topology
+
+The Tiny TPU implements a **2×2 systolic array** with four processing elements:
+
+```
+        Weight In 11    Weight In 12
+             ↓               ↓
+           ┌───┐           ┌───┐
+Data 11 →  │PE │  Data →   │PE │
+           │11 │           │12 │
+           └───┘           └───┘
+             ↓               ↓
+           PSum            PSum
+             ↓               ↓
+           ┌───┐           ┌───┐
+Data 21 →  │PE │  Data →   │PE │
+           │21 │           │22 │
+           └───┘           └───┘
+             ↓               ↓
+          Out 21          Out 22
+```
+
+### PE instantiation
+
+The array instantiates four PE modules with carefully routed connections:
+
+```systemverilog
+pe pe11 (
+    .clk(clk),
+    .rst(rst),
+    .pe_enabled(pe_enabled[0]),
+    .pe_valid_in(sys_start),
+    .pe_valid_out(pe_valid_out_11),
+    .pe_accept_w_in(sys_accept_w_1),
+    .pe_switch_in(sys_switch_in),
+    .pe_switch_out(pe_switch_out_11),
+    .pe_input_in(sys_data_in_11),
+    .pe_psum_in(16'b0),              // Top row: no partial sum input
+    .pe_weight_in(sys_weight_in_11),
+    .pe_input_out(pe_input_out_11),
+    .pe_psum_out(pe_psum_out_11),
+    .pe_weight_out(pe_weight_out_11)
+);
+```
+
+Source: [systolic.sv:56-74](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L56-L74)
+
+<Note>
+The top row PEs receive `pe_psum_in = 16'b0` since there are no PEs above them. Partial sums start accumulating from zero.
+</Note>
+
+## Data flow patterns
+
+### Horizontal flow (activations)
+
+Input activations flow from **left to right** across rows:
+
+1. `sys_data_in_11` enters PE11
+2. PE11 forwards to PE12 via `pe_input_out_11`
+3. `sys_data_in_21` enters PE21
+4. PE21 forwards to PE22 via `pe_input_out_21`
+
+Each PE delays the data by one clock cycle, creating a **staggered pattern**.
+
+### Vertical flow (partial sums)
+
+Partial sums flow from **top to bottom** down columns:
+
+1. PE11 outputs `pe_psum_out_11` (first partial sum)
+2. `pe_psum_out_11` enters PE21 as `pe_psum_in`
+3. PE21 adds its contribution and outputs `sys_data_out_21`
+
+This accumulation implements the dot product:
+```
+sys_data_out_21 = (data_11 × weight_11) + (data_21 × weight_21)
+```
+
+### Vertical flow (weights)
+
+During weight loading, weights propagate from **top to bottom**:
+
+1. `sys_weight_in_11` enters PE11
+2. PE11 forwards to PE21 via `pe_weight_out_11`
+3. Both PEs store the weight in their inactive registers
+
+```systemverilog
+pe pe21 (
+    // ...
+    .pe_weight_in(pe_weight_out_11),  // Weight from PE above
+    // ...
+);
+```
+
+Source: [systolic.sv:110](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L110)
+
+### Diagonal flow (switch signal)
+
+The `sys_switch_in` signal propagates **diagonally** (top-left to bottom-right):
+
+```
+PE11 receives sys_switch_in
+  ↓
+PE12 and PE21 receive pe_switch_out_11
+  ↓
+PE22 receives pe_switch_out_12
+```
+
+This ensures all PEs activate their weights in the correct sequence.
+
+## Weight management
+
+### Weight loading
+
+Weights are loaded column-by-column using separate control signals:
+
+```systemverilog
+input logic sys_accept_w_1,  // Enable weight loading for column 1 (PE11, PE21)
+input logic sys_accept_w_2,  // Enable weight loading for column 2 (PE12, PE22)
+```
+
+Column 1 weights flow through:
+```
+sys_weight_in_11 → PE11 → PE21
+```
+
+Column 2 weights flow through:
+```
+sys_weight_in_12 → PE12 → PE22
+```
+
+### Weight activation
+
+After loading, assert `sys_switch_in` to activate all weights simultaneously:
+
+```systemverilog
+input logic sys_switch_in;  // Copies weight from shadow buffer to active buffer
+```
+
+The switch signal propagates through the array:
+- PE11: Direct from input
+- PE12, PE21: From PE11's `pe_switch_out`
+- PE22: From PE12's `pe_switch_out`
+
+Source: [systolic.sv:85-86](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L85-L86), [systolic.sv:125](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L125)
+
+## Column enable control
+
+The array supports dynamic column disabling for matrices narrower than the array width:
+
+```systemverilog
+logic [1:0] pe_enabled;  // Bit mask for enabled columns
+
+always@(posedge clk or posedge rst) begin
+    if(rst) begin
+        pe_enabled <= '0;
+    end else begin
+        if(ub_rd_col_size_valid_in) begin
+            pe_enabled <= (1 << ub_rd_col_size_in) - 1;
+        end
+    end
+end
+```
+
+Source: [systolic.sv:136-144](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L136-L144)
+
+### Examples:
+
+- `ub_rd_col_size_in = 0`: `pe_enabled = 2'b00` (no columns)
+- `ub_rd_col_size_in = 1`: `pe_enabled = 2'b01` (column 0 only)
+- `ub_rd_col_size_in = 2`: `pe_enabled = 2'b11` (both columns)
+
+<Tip>
+Column enabling allows the same hardware to efficiently handle matrices of different widths without wasting computation or producing incorrect results.
+</Tip>
+
+## Timing and staggering
+
+### Why staggering?
+
+For correct matrix multiplication, inputs must arrive at each PE at the right time. Consider computing C = A × B:
+
+```
+A = [a11 a12]    B = [b11 b12]    C = [c11 c12]
+    [a21 a22]        [b21 b22]        [c21 c22]
+```
+
+To compute `c21 = a21×b11 + a22×b21`:
+- PE21 needs `a21` and `b11` at time T
+- PE21 needs `a22` and `b21` at time T+1
+
+But inputs flow horizontally with 1-cycle delay:
+- PE11 receives `a11` at time T
+- PE12 receives `a11` at time T+1
+
+Solution: **Stagger the input streams**!
+
+### Input staggering
+
+The unified buffer staggers inputs automatically:
+- Row 1 inputs start at time T
+- Row 2 inputs start at time T+1
+- Row 3 inputs start at time T+2
+- ...
+
+This ensures each PE receives the correct input at the correct time.
+
+<Warning>
+The unified buffer must implement proper staggering logic. See the [unified buffer documentation](/architecture/unified-buffer) for details on how `rd_input_time_counter` controls this.
+</Warning>
+
+## Valid signal propagation
+
+Valid signals propagate through the array to indicate when outputs are meaningful:
+
+```systemverilog
+wire pe_valid_out_11;  // PE11 → PE12 and PE21
+wire pe_valid_out_12;  // PE12 → PE22
+
+output wire sys_valid_out_21;  // From PE21
+output wire sys_valid_out_22;  // From PE22
+```
+
+Source: [systolic.sv:50-51](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/systolic.sv#L50-L51)
+
+Valid signals follow the same paths as data:
+- Horizontally: PE11 → PE12
+- Vertically: PE11 → PE21 → output
+- Horizontally then vertically: PE12 → PE22 → output
+
+## Matrix multiplication example
+
+Computing a 2×2 matrix multiplication:
+
+```
+C = A × B
+where A = [1 2], B = [5 6]
+          [3 4]      [7 8]
+```
+
+### Setup phase (cycle 0-1):
+```
+Load weights (B^T transposed):
+  PE11 ← 5, PE12 ← 7
+  PE21 ← 6, PE22 ← 8
+Assert sys_switch_in to activate
+```
+
+### Computation phase:
+```
+Cycle 2: Input a11=1 enters PE11
+Cycle 3: Input a11=1 enters PE12, a12=2 enters PE11, a21=3 enters PE21
+Cycle 4: Input a12=2 enters PE12, a22=4 enters PE11 and PE21
+Cycle 5: Results start emerging from PE21 and PE22
+```
+
+### Output phase:
+```
+sys_data_out_21 = (1×5) + (2×7) = 19  (c11)
+sys_data_out_22 = (1×6) + (2×8) = 22  (c12)
+(next cycle)
+sys_data_out_21 = (3×5) + (4×7) = 43  (c21)
+sys_data_out_22 = (3×6) + (4×8) = 50  (c22)
+```
+
+## Scalability
+
+The current implementation uses `SYSTOLIC_ARRAY_WIDTH = 2`, but the design can scale:
+
+```systemverilog
+parameter int SYSTOLIC_ARRAY_WIDTH = 2  // 2×2 = 4 PEs
+```
+
+To scale to larger arrays:
+1. Increase `SYSTOLIC_ARRAY_WIDTH` parameter
+2. Add more PE instantiations
+3. Update interconnect wiring
+4. Adjust unified buffer dimensions
+
+<Note>
+Scaling to 256×256 (65,536 PEs) is mentioned as a future goal, which would provide massive parallelism for neural network acceleration.
+</Note>

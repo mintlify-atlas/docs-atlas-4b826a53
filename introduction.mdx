@@ -1,0 +1,152 @@
+---
+title: Introduction to Tiny TPU
+description: A minimal tensor processing unit written in SystemVerilog, reinvented from Google's TPU architecture
+---
+
+<img
+  className="block dark:hidden"
+  src="/images/hero-light.png"
+  alt="Tiny TPU Hero Light"
+/>
+<img
+  className="hidden dark:block"
+  src="/images/hero-dark.png"
+  alt="Tiny TPU Hero Dark"
+/>
+
+## What is Tiny TPU?
+
+Tiny TPU is a minimal tensor processing unit (TPU) designed from the ground up, reinvented from Google's TPU V2 and V1 architectures. Built entirely in SystemVerilog, this project demonstrates how to design a hardware accelerator capable of performing neural network operations at the chip level.
+
+Unlike closed-source TPU architectures, Tiny TPU is completely open source and designed to be the ultimate guide for breaking into chip accelerator design — even if you just learned high school math and only know y = mx + b.
+
+<CardGroup cols={2}>
+  <Card
+    title="Quick start"
+    icon="rocket"
+    href="/quickstart"
+  >
+    Get your first TPU simulation running in minutes
+  </Card>
+  <Card
+    title="Architecture"
+    icon="sitemap"
+    href="/architecture/overview"
+  >
+    Explore the systolic array, VPU, and unified buffer design
+  </Card>
+  <Card
+    title="Instruction set"
+    icon="microchip"
+    href="/instruction-set/overview"
+  >
+    Learn the 94-bit ISA that controls the TPU
+  </Card>
+  <Card
+    title="Development"
+    icon="code"
+    href="/development/setup"
+  >
+    Add new modules and contribute to the project
+  </Card>
+</CardGroup>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="Systolic array" icon="grid">
+    A 2D grid of processing elements that perform multiply-accumulate operations every clock cycle with data flowing horizontally and partial sums vertically
+  </Card>
+  <Card title="Vector processing unit" icon="calculator">
+    Pipelined modules for bias addition, Leaky ReLU activation, MSE loss computation, and backpropagation
+  </Card>
+  <Card title="Unified buffer" icon="database">
+    Dual-port memory for storing input matrices, weights, biases, and intermediate activation values
+  </Card>
+  <Card title="Custom ISA" icon="code">
+    A 94-bit instruction set architecture for controlling data flow and computation stages
+  </Card>
+</CardGroup>
+
+## How it works
+
+The Tiny TPU architecture consists of five main components working together:
+
+<Steps>
+  <Step title="Control unit">
+    Reads 94-bit instructions that orchestrate data movement and computation across all subsystems
+  </Step>
+  <Step title="Unified buffer">
+    Stores all matrices, weights, and intermediate values with dual-port access for simultaneous reads and writes
+  </Step>
+  <Step title="Systolic array">
+    A 2D grid of processing elements (PEs) where each PE performs multiply-accumulate operations. Data flows horizontally, partial sums flow vertically, and weights remain stationary
+  </Step>
+  <Step title="Vector processing unit">
+    Applies element-wise operations like bias addition and activation functions in a pipelined architecture
+  </Step>
+  <Step title="Output">
+    Results are written back to the unified buffer or used for further computation stages
+  </Step>
+</Steps>
+
+## Processing element operation
+
+At the heart of the systolic array is the processing element (PE), which performs the fundamental multiply-accumulate operation:
+
+```systemverilog
+output_sum = (input_data × weight) + input_partial_sum
+```
+
+Each PE:
+- Multiplies incoming data by a stored weight
+- Adds the result to an incoming partial sum
+- Passes data horizontally to the next PE
+- Passes the computed sum vertically downward
+
+<Note>
+  The systolic array design allows for highly parallel matrix multiplication with minimal data movement, making it extremely efficient for neural network workloads.
+</Note>
+
+## Why Tiny TPU?
+
+The details of TPU architecture are typically closed source, as is most chip design. This project was created by a dedicated group with no prior professional hardware architecture experience to:
+
+- Provide a complete, open-source reference for tensor processing unit design
+- Demonstrate how to approach complex hardware problems with an inventive mindset
+- Make chip accelerator design accessible to all levels of technical expertise
+- Serve as a learning resource for SystemVerilog, hardware testing, and digital design
+
+<Check>
+  This project uses real hardware description language (SystemVerilog), actual simulation tools (Icarus Verilog), and industry-standard testing frameworks (cocotb) — the same tools used in professional chip design.
+</Check>
+
+## What you'll learn
+
+By working through this documentation and exploring the source code, you'll gain hands-on experience with:
+
+- **Hardware description languages**: Writing and understanding SystemVerilog modules
+- **Digital design**: Implementing multiply-accumulate units, memory buffers, and control logic
+- **Systolic architectures**: Understanding data flow in matrix multiplication accelerators
+- **Verification**: Testing hardware with Python-based testbenches using cocotb
+- **Waveform analysis**: Debugging digital circuits with GTKWave
+- **Fixed-point arithmetic**: Implementing neural network operations in hardware
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card
+    title="Get started"
+    icon="play"
+    href="/quickstart"
+  >
+    Run your first TPU simulation and see matrix multiplication in action
+  </Card>
+  <Card
+    title="Explore the architecture"
+    icon="magnifying-glass"
+    href="/architecture/overview"
+  >
+    Deep dive into the systolic array, VPU, and unified buffer designs
+  </Card>
+</CardGroup>

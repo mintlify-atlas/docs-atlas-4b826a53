@@ -1,0 +1,399 @@
+---
+title: Vector processing unit
+description: VPU pipeline architecture for element-wise operations
+---
+
+The vector processing unit (VPU) performs element-wise operations on vectors after they exit the systolic array. The VPU implements a configurable pipeline of activation functions, loss derivatives, and bias addition.
+
+## Module interface
+
+```systemverilog
+module vpu (
+    input logic clk,
+    input logic rst,
+
+    input logic [3:0] vpu_data_pathway,  // Module selection control
+
+    // Inputs from systolic array
+    input logic signed [15:0] vpu_data_in_1,
+    input logic signed [15:0] vpu_data_in_2,
+    input logic vpu_valid_in_1,
+    input logic vpu_valid_in_2,
+
+    // Inputs from unified buffer
+    input logic signed [15:0] bias_scalar_in_1,
+    input logic signed [15:0] bias_scalar_in_2,
+    input logic signed [15:0] lr_leak_factor_in,
+    input logic signed [15:0] Y_in_1,
+    input logic signed [15:0] Y_in_2,
+    input logic signed [15:0] inv_batch_size_times_two_in,
+    input logic signed [15:0] H_in_1,
+    input logic signed [15:0] H_in_2,
+
+    // Outputs to unified buffer
+    output logic signed [15:0] vpu_data_out_1,
+    output logic signed [15:0] vpu_data_out_2,
+    output logic vpu_valid_out_1,
+    output logic vpu_valid_out_2
+);
+```
+
+Source: [vpu.sv:19-46](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L19-L46)
+
+## Pipeline modules
+
+The VPU contains four pipelined modules that can be selectively activated:
+
+### 1. Bias addition
+
+Adds a bias scalar to each element:
+```
+Z = X + bias
+```
+
+Implemented by `bias_parent` module containing two `bias_child` instances (one per column):
+
+```systemverilog
+bias_parent bias_parent_inst (
+    .clk(clk),
+    .rst(rst),
+    .bias_sys_data_in_1(bias_data_1_in),
+    .bias_sys_data_in_2(bias_data_2_in),
+    .bias_sys_valid_in_1(bias_valid_1_in),
+    .bias_sys_valid_in_2(bias_valid_2_in),
+    .bias_scalar_in_1(bias_scalar_in_1),    // From UB
+    .bias_scalar_in_2(bias_scalar_in_2),    // From UB
+    .bias_Z_valid_out_1(bias_valid_1_out),
+    .bias_Z_valid_out_2(bias_valid_2_out),
+    .bias_z_data_out_1(bias_z_data_out_1),
+    .bias_z_data_out_2(bias_z_data_out_2)
+);
+```
+
+Source: [vpu.sv:115-130](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L115-L130)
+
+### 2. Leaky ReLU activation
+
+Applies leaky ReLU activation function:
+```
+H(z) = z           if z > 0
+     = z × leak    if z ≤ 0
+```
+
+Implemented by `leaky_relu_parent` module:
+
+```systemverilog
+leaky_relu_parent leaky_relu_parent_inst (
+    .clk(clk),
+    .rst(rst),
+    .lr_data_1_in(lr_data_1_in),
+    .lr_data_2_in(lr_data_2_in),
+    .lr_valid_1_in(lr_valid_1_in),
+    .lr_valid_2_in(lr_valid_2_in),
+    .lr_leak_factor_in(lr_leak_factor_in),  // From UB
+    .lr_data_1_out(lr_data_1_out),
+    .lr_data_2_out(lr_data_2_out),
+    .lr_valid_1_out(lr_valid_1_out),
+    .lr_valid_2_out(lr_valid_2_out)
+);
+```
+
+Source: [vpu.sv:133-148](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L133-L148)
+
+<Note>
+The leak factor is typically a small positive value (e.g., 0.01) that allows a small gradient for negative inputs, preventing "dead neurons" in the network.
+</Note>
+
+### 3. Loss derivative (MSE)
+
+Computes the derivative of mean squared error loss:
+```
+∂L/∂H = (2/batch_size) × (H - Y)
+```
+
+Implemented by `loss_parent` module:
+
+```systemverilog
+loss_parent loss_parent_inst (
+    .clk(clk),
+    .rst(rst),
+    .H_1_in(loss_data_1_in),
+    .H_2_in(loss_data_2_in),
+    .valid_1_in(loss_valid_1_in),
+    .valid_2_in(loss_valid_2_in),
+    .Y_1_in(Y_in_1),                        // From UB
+    .Y_2_in(Y_in_2),                        // From UB
+    .inv_batch_size_times_two_in(inv_batch_size_times_two_in),
+    .gradient_1_out(loss_data_1_out),
+    .gradient_2_out(loss_data_2_out),
+    .valid_1_out(loss_valid_1_out),
+    .valid_2_out(loss_valid_2_out)
+);
+```
+
+Source: [vpu.sv:150-166](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L150-L166)
+
+<Warning>
+The module is currently named `loss_parent` but actually computes the loss derivative, not the loss value itself. This is noted in the code comments at line 150.
+</Warning>
+
+### 4. Leaky ReLU derivative
+
+Computes the derivative of leaky ReLU:
+```
+∂H/∂Z = 1          if H > 0
+      = leak       if H ≤ 0
+```
+
+Then multiplies by the gradient from the next layer:
+```
+∂L/∂Z = ∂L/∂H × ∂H/∂Z
+```
+
+Implemented by `leaky_relu_derivative_parent` module:
+
+```systemverilog
+leaky_relu_derivative_parent leaky_relu_derivative_parent_inst (
+    .clk(clk),
+    .rst(rst),
+    .lr_d_data_1_in(lr_d_data_1_in),
+    .lr_d_data_2_in(lr_d_data_2_in),
+    .lr_d_valid_1_in(lr_d_valid_1_in),
+    .lr_d_valid_2_in(lr_d_valid_2_in),
+    .lr_d_H_1_in(lr_d_H_in_1),              // From UB or cached
+    .lr_d_H_2_in(lr_d_H_in_2),              // From UB or cached
+    .lr_leak_factor_in(lr_leak_factor_in),
+    .lr_d_data_1_out(lr_d_data_1_out),
+    .lr_d_data_2_out(lr_d_data_2_out),
+    .lr_d_valid_1_out(lr_d_valid_1_out),
+    .lr_d_valid_2_out(lr_d_valid_2_out)
+);
+```
+
+Source: [vpu.sv:168-185](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L168-L185)
+
+## Data pathways
+
+The `vpu_data_pathway` 4-bit control signal selects which modules are active:
+
+```systemverilog
+vpu_data_pathway[3:0]:
+  [3] - Bias module enable
+  [2] - Leaky ReLU module enable
+  [1] - Loss derivative module enable
+  [0] - Leaky ReLU derivative module enable
+```
+
+Source: [vpu.sv:10-17](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L10-L17)
+
+### Pathway configurations
+
+#### Forward pass pathway (4'b1100)
+
+```
+Systolic Array → Bias → Leaky ReLU → Output
+```
+
+Used for hidden layer computations during forward propagation.
+
+```systemverilog
+vpu_data_pathway = 4'b1100;  // Bias + Leaky ReLU
+```
+
+#### Transition pathway (4'b1111)
+
+```
+Systolic Array → Bias → Leaky ReLU → Loss → LR Derivative → Output
+                           ↓
+                    (cache H matrix)
+```
+
+Used for the output layer, computing both forward pass and loss gradient.
+
+```systemverilog
+vpu_data_pathway = 4'b1111;  // All modules
+```
+
+Special behavior: Caches the H matrix output from leaky ReLU for use in the derivative computation.
+
+#### Backward pass pathway (4'b0001)
+
+```
+Systolic Array → Leaky ReLU Derivative → Output
+```
+
+Used for hidden layer gradients during backpropagation.
+
+```systemverilog
+vpu_data_pathway = 4'b0001;  // LR Derivative only
+```
+
+#### No operation (4'b0000)
+
+```
+Systolic Array → (bypassed) → Output
+```
+
+Passes data through unchanged.
+
+## Routing logic
+
+The VPU uses combinational logic to route data between modules based on the pathway control:
+
+### Bias module routing
+
+```systemverilog
+if(vpu_data_pathway[3]) begin
+    // Connect vpu inputs to bias module
+    bias_data_1_in = vpu_data_in_1;
+    bias_data_2_in = vpu_data_in_2;
+    bias_valid_1_in = vpu_valid_in_1;
+    bias_valid_2_in = vpu_valid_in_2;
+    
+    // Connect bias output to intermediate values
+    b_to_lr_data_in_1 = bias_z_data_out_1;
+    b_to_lr_data_in_2 = bias_z_data_out_2;
+    // ...
+end else begin
+    // Bypass bias module
+    b_to_lr_data_in_1 = vpu_data_in_1;
+    b_to_lr_data_in_2 = vpu_data_in_2;
+    // ...
+end
+```
+
+Source: [vpu.sv:213-237](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L213-L237)
+
+This pattern repeats for each module, creating a flexible pipeline where any combination of modules can be activated or bypassed.
+
+## H matrix caching
+
+During the transition pathway, the VPU caches the H matrix (post-activation values) for use in computing activation derivatives:
+
+```systemverilog
+if (vpu_data_pathway[1]) begin  // Loss module active
+    // Cache and use 'last H matrix'
+    last_H_data_1_in = lr_data_1_out;
+    last_H_data_2_in = lr_data_2_out;
+    lr_d_H_in_1 = last_H_data_1_out;
+    lr_d_H_in_2 = last_H_data_2_out;
+end else begin
+    // Use H matrix from unified buffer
+    lr_d_H_in_1 = H_in_1;
+    lr_d_H_in_2 = H_in_2;
+end
+```
+
+Source: [vpu.sv:281-302](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L281-L302)
+
+The cache is implemented with sequential logic:
+
+```systemverilog
+always @(posedge clk or posedge rst) begin
+    if (rst) begin
+        last_H_data_1_out <= 0;
+        last_H_data_2_out <= 0;
+    end else begin
+        if (vpu_data_pathway[1]) begin
+            last_H_data_1_out <= last_H_data_1_in;
+            last_H_data_2_out <= last_H_data_2_in;
+        end
+    end
+end
+```
+
+Source: [vpu.sv:333-347](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L333-L347)
+
+<Tip>
+Caching the H matrix in the VPU eliminates the need to write it to the unified buffer and read it back, saving memory bandwidth during the critical transition from forward to backward pass.
+</Tip>
+
+## Reset behavior
+
+On reset, all internal signals are set to zero:
+
+```systemverilog
+always @(*) begin
+    if (rst) begin
+        vpu_data_out_1 = 16'b0;
+        vpu_data_out_2 = 16'b0;
+        vpu_valid_out_1 = 1'b0;
+        vpu_valid_out_2 = 1'b0;
+        // All internal wires zeroed...
+    end
+end
+```
+
+Source: [vpu.sv:187-211](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv#L187-L211)
+
+## Dual-column processing
+
+The VPU processes two columns simultaneously:
+- Column 1: `_data_in_1`, `_data_out_1`, `_valid_in_1`, `_valid_out_1`
+- Column 2: `_data_in_2`, `_data_out_2`, `_valid_in_2`, `_valid_out_2`
+
+This matches the 2×2 systolic array width, allowing the bottom two PEs' outputs to be processed in parallel.
+
+## Parent-child module pattern
+
+Each VPU function uses a parent-child pattern:
+- **Parent module**: Instantiates two child modules (one per column)
+- **Child module**: Implements the actual computation
+
+Example for bias addition:
+
+```systemverilog
+module bias_parent(
+    // Dual-column interface
+);
+    bias_child column_1 (
+        .bias_scalar_in(bias_scalar_in_1),
+        .bias_sys_data_in(bias_sys_data_in_1),
+        // ...
+    );
+    
+    bias_child column_2 (
+        .bias_scalar_in(bias_scalar_in_2),
+        .bias_sys_data_in(bias_sys_data_in_2),
+        // ...
+    );
+endmodule
+```
+
+Source: [bias_parent.sv:26-44](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_parent.sv#L26-L44)
+
+This pattern provides:
+- Clean separation of concerns
+- Easy replication for additional columns
+- Independent operation per column
+
+## Usage in neural network training
+
+### Forward pass
+
+1. **Hidden layer**: `4'b1100` (bias + ReLU)
+   ```
+   Z = W×X + b
+   H = LeakyReLU(Z)
+   ```
+
+2. **Output layer**: `4'b1111` (bias + ReLU + loss + derivative)
+   ```
+   Z = W×H + b
+   Y_hat = LeakyReLU(Z)
+   ∂L/∂Y_hat = (2/N) × (Y_hat - Y)
+   ∂L/∂Z = ∂L/∂Y_hat × LeakyReLU'(Z)
+   ```
+
+### Backward pass
+
+1. **Hidden layers**: `4'b0001` (derivative only)
+   ```
+   ∂L/∂H = W^T × ∂L/∂Z_next
+   ∂L/∂Z = ∂L/∂H × LeakyReLU'(Z)
+   ```
+
+2. **Weight gradients**: Computed in systolic array
+   ```
+   ∂L/∂W = ∂L/∂Z × H^T
+   ```

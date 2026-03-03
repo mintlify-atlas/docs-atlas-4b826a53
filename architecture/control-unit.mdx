@@ -1,0 +1,343 @@
+---
+title: Control unit
+description: Instruction decoder and system controller
+---
+
+The control unit decodes instructions and generates control signals for all other TPU components. It implements a simple but complete instruction set architecture (ISA) for controlling matrix operations and neural network training.
+
+## Module interface
+
+```systemverilog
+module control_unit (
+    input logic [87:0] instruction,  // 88-bit instruction word
+    
+    // 1-bit control signals
+    output logic sys_switch_in,
+    output logic ub_rd_start_in,
+    output logic ub_rd_transpose,
+    output logic ub_wr_host_valid_in_1,
+    output logic ub_wr_host_valid_in_2,
+    
+    // Multi-bit control fields
+    output logic [1:0] ub_rd_col_size,
+    output logic [7:0] ub_rd_row_size,
+    output logic [1:0] ub_rd_addr_in,
+    output logic [2:0] ub_ptr_sel,
+    output logic [15:0] ub_wr_host_data_in_1,
+    output logic [15:0] ub_wr_host_data_in_2,
+    output logic [3:0] vpu_data_pathway,
+    output logic [15:0] inv_batch_size_times_two_in,
+    output logic [15:0] vpu_leak_factor_in
+);
+```
+
+Source: [control_unit.sv:4-34](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L4-L34)
+
+<Note>
+The control unit is purely combinational - it decodes the instruction word into output signals without any sequential logic or state.
+</Note>
+
+## Instruction format
+
+The ISA uses **88-bit wide instructions** (documented as 94 bits in README, implementation is 88 bits):
+
+```
+Bits [87:0] - Complete instruction word
+```
+
+Each instruction directly encodes all control signals needed for one operation.
+
+### Bit field allocation
+
+#### Bits [0-4]: Single-bit control signals (5 bits)
+
+```systemverilog
+assign sys_switch_in = instruction[0];
+assign ub_rd_start_in = instruction[1];
+assign ub_rd_transpose = instruction[2];
+assign ub_wr_host_valid_in_1 = instruction[3];
+assign ub_wr_host_valid_in_2 = instruction[4];
+```
+
+Source: [control_unit.sv:38-42](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L38-L42)
+
+| Bit | Signal | Function |
+|-----|--------|----------|
+| 0 | `sys_switch_in` | Activate preloaded weights in systolic array |
+| 1 | `ub_rd_start_in` | Start a unified buffer read operation |
+| 2 | `ub_rd_transpose` | Transpose matrix during UB read |
+| 3 | `ub_wr_host_valid_in_1` | Host write valid for column 1 |
+| 4 | `ub_wr_host_valid_in_2` | Host write valid for column 2 |
+
+#### Bits [5-6]: Column size (2 bits)
+
+```systemverilog
+assign ub_rd_col_size = instruction[6:5];
+```
+
+Source: [control_unit.sv:45](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L45)
+
+Specifies number of columns to read (0-3):
+- `2'b00` = 0 columns
+- `2'b01` = 1 column
+- `2'b10` = 2 columns
+- `2'b11` = 3 columns
+
+#### Bits [7-14]: Row size (8 bits)
+
+```systemverilog
+assign ub_rd_row_size = instruction[14:7];
+```
+
+Source: [control_unit.sv:48](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L48)
+
+Specifies number of rows to read (0-255).
+
+#### Bits [15-16]: Read address (2 bits)
+
+```systemverilog
+assign ub_rd_addr_in = instruction[16:15];
+```
+
+Source: [control_unit.sv:51](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L51)
+
+Starting address in unified buffer (0-3 in this implementation).
+
+<Warning>
+The address field is only 2 bits in the control unit implementation, limiting addresses to 0-3, but the unified buffer interface expects 16 bits. This appears to be a mismatch between the control unit and other modules.
+</Warning>
+
+#### Bits [17-19]: Pointer select (3 bits)
+
+```systemverilog
+assign ub_ptr_sel = instruction[19:17];
+```
+
+Source: [control_unit.sv:54](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L54)
+
+Selects which unified buffer read pointer to configure:
+- `3'b000` = Input data pointer
+- `3'b001` = Weight data pointer  
+- `3'b010` = Bias pointer
+- `3'b011` = Y (target) pointer
+- `3'b100` = H (activation) pointer
+- `3'b101` = Gradient bias pointer
+- `3'b110` = Gradient weight pointer
+
+#### Bits [20-35]: Host write data 1 (16 bits)
+
+```systemverilog
+assign ub_wr_host_data_in_1 = instruction[35:20];
+```
+
+Source: [control_unit.sv:57](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L57)
+
+Data word to write to unified buffer column 1 when `ub_wr_host_valid_in_1` is set.
+
+#### Bits [36-51]: Host write data 2 (16 bits)
+
+```systemverilog
+assign ub_wr_host_data_in_2 = instruction[51:36];
+```
+
+Source: [control_unit.sv:60](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L60)
+
+Data word to write to unified buffer column 2 when `ub_wr_host_valid_in_2` is set.
+
+#### Bits [52-55]: VPU data pathway (4 bits)
+
+```systemverilog
+assign vpu_data_pathway = instruction[55:52];
+```
+
+Source: [control_unit.sv:63](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L63)
+
+Controls which VPU modules are active:
+- Bit [3]: Bias module
+- Bit [2]: Leaky ReLU module
+- Bit [1]: Loss derivative module
+- Bit [0]: Leaky ReLU derivative module
+
+Common values:
+- `4'b1100` = Forward pass (bias + ReLU)
+- `4'b1111` = Transition (all modules)
+- `4'b0001` = Backward pass (ReLU derivative only)
+- `4'b0000` = No operation
+
+#### Bits [56-71]: Inverse batch size × 2 (16 bits)
+
+```systemverilog
+assign inv_batch_size_times_two_in = instruction[71:56];
+```
+
+Source: [control_unit.sv:66](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L66)
+
+Precomputed constant for MSE loss gradient: `2 / batch_size` in Q8.8 fixed-point format.
+
+Example: For batch_size = 32:
+```
+2/32 = 0.0625 = 0x0010 in Q8.8
+```
+
+#### Bits [72-87]: VPU leak factor (16 bits)
+
+```systemverilog
+assign vpu_leak_factor_in = instruction[87:72];
+```
+
+Source: [control_unit.sv:69](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv#L69)
+
+Leaky ReLU leak factor (α) in Q8.8 fixed-point format.
+
+Example: For α = 0.01:
+```
+0.01 ≈ 0x0003 in Q8.8
+```
+
+## Instruction encoding
+
+### Complete bit layout
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Bit 87                                              Bit 0    │
+├──────┬──────┬──────┬──────┬──────┬──────┬──────┬──────┬─────┤
+│ Leak │Inv BS│ VPU  │ Data │ Data │Ptr   │Addr  │ Row  │Col+1│
+│Factor│ ×2   │Pathwy│  2   │  1   │Sel   │      │ Size │bit  │
+│16bit │16bit │4bit  │16bit │16bit │3bit  │2bit  │8bit  │5bit │
+└──────┴──────┴──────┴──────┴──────┴──────┴──────┴──────┴─────┘
+ 87-72  71-56  55-52  51-36  35-20  19-17  16-15  14-7   6-0
+```
+
+### Example instructions
+
+#### Load weights from host
+
+```
+Write weight values 0x1000 and 0x2000 to unified buffer:
+
+instruction = {
+    16'h0000,  // [87:72] leak_factor (unused)
+    16'h0000,  // [71:56] inv_batch_size (unused)
+    4'b0000,   // [55:52] vpu_pathway (unused)
+    16'h2000,  // [51:36] host_data_2
+    16'h1000,  // [35:20] host_data_1
+    3'b000,    // [19:17] ptr_sel (unused)
+    2'b00,     // [16:15] addr (unused)
+    8'h00,     // [14:7]  row_size (unused)
+    2'b00,     // [6:5]   col_size (unused)
+    1'b0,      // [4]     host_valid_2 = 0
+    1'b1,      // [3]     host_valid_1 = 1
+    1'b0,      // [2]     transpose = 0
+    1'b0,      // [1]     rd_start = 0
+    1'b0       // [0]     switch = 0
+};
+```
+
+#### Start systolic array read
+
+```
+Read 2×2 input matrix from address 0 (no transpose):
+
+instruction = {
+    16'h0000,  // [87:72] leak_factor
+    16'h0000,  // [71:56] inv_batch_size
+    4'b0000,   // [55:52] vpu_pathway
+    16'h0000,  // [51:36] host_data_2
+    16'h0000,  // [35:20] host_data_1
+    3'b000,    // [19:17] ptr_sel = 0 (input pointer)
+    2'b00,     // [16:15] addr = 0
+    8'h02,     // [14:7]  row_size = 2
+    2'b10,     // [6:5]   col_size = 2
+    1'b0,      // [4]     host_valid_2 = 0
+    1'b0,      // [3]     host_valid_1 = 0
+    1'b0,      // [2]     transpose = 0
+    1'b1,      // [1]     rd_start = 1
+    1'b0       // [0]     switch = 0
+};
+```
+
+#### Activate weights
+
+```
+Switch systolic array to use preloaded weights:
+
+instruction = {
+    16'h0000,  // All other fields zero
+    // ...
+    1'b0,      // [4]     host_valid_2 = 0
+    1'b0,      // [3]     host_valid_1 = 0
+    1'b0,      // [2]     transpose = 0
+    1'b0,      // [1]     rd_start = 0
+    1'b1       // [0]     switch = 1
+};
+```
+
+## Instruction sequencing
+
+Instructions are loaded from an instruction buffer in testbenches:
+
+```python
+# From test_tpu.py
+instructions = [
+    load_weight_instruction,
+    switch_weights_instruction,
+    read_input_instruction,
+    configure_vpu_instruction,
+    # ...
+]
+```
+
+See `tests/test_tpu.py` for complete instruction sequences implementing forward and backward passes.
+
+## Design philosophy
+
+### VLIW-style encoding
+
+The instruction format resembles Very Long Instruction Word (VLIW) architectures:
+- Each instruction is very wide (88 bits)
+- All control signals encoded directly
+- No instruction decode complexity
+- Single-cycle decode (combinational)
+
+### Advantages
+
+- **Simple hardware**: No state machines or complex decode logic
+- **Deterministic timing**: One instruction = one operation
+- **Flexible control**: Can configure all units simultaneously
+- **Easy debugging**: Instructions are human-readable bit patterns
+
+### Tradeoffs
+
+- **Large instruction size**: 88 bits per instruction
+- **Low code density**: Many bits unused in each instruction
+- **No instruction reuse**: No loops or subroutines in hardware
+- **Host-dependent**: Requires external instruction generation
+
+<Tip>
+The large instruction width is acceptable because instructions are generated by software and stored off-chip. The simplicity of hardware decode is more important than code density for this architecture.
+</Tip>
+
+## Future improvements
+
+From the README, future work includes:
+
+1. **Compiler**: Automatic instruction generation from high-level operations
+   ```python
+   # High-level API (future)
+   tpu.load_weights(W1, address=8)
+   tpu.forward_pass(X, W1, b1)
+   ```
+   Would compile to sequence of 88-bit instructions.
+
+2. **Extended addressing**: Increase address field width for larger buffers
+
+3. **Compressed encoding**: Add instruction compression for repeated patterns
+
+## Related documentation
+
+See the [instruction set documentation](/instruction-set/overview) for:
+- Complete ISA reference
+- Field encoding details  
+- Example instruction sequences
+- Assembly format (if implemented)

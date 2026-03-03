@@ -1,0 +1,221 @@
+---
+title: Control unit
+description: Instruction decoder that unpacks control signals for the TPU
+---
+
+The control unit is a purely combinational module that decodes a wide instruction word into individual control signals for the TPU's various components. It acts as an instruction decoder, mapping bit fields to named control signals.
+
+## Module declaration
+
+```systemverilog
+module control_unit (
+    input logic [87:0] instruction,
+    // Output signals (see below)
+    output logic sys_switch_in,
+    output logic ub_rd_start_in,
+    output logic ub_rd_transpose,
+    output logic ub_wr_host_valid_in_1,
+    output logic ub_wr_host_valid_in_2,
+    output logic [1:0] ub_rd_col_size,
+    output logic [7:0] ub_rd_row_size,
+    output logic [1:0] ub_rd_addr_in,
+    output logic [2:0] ub_ptr_sel,
+    output logic [15:0] ub_wr_host_data_in_1,
+    output logic [15:0] ub_wr_host_data_in_2,
+    output logic [3:0] vpu_data_pathway,
+    output logic [15:0] inv_batch_size_times_two_in,
+    output logic [15:0] vpu_leak_factor_in
+);
+```
+
+## Input port
+
+<ParamField path="instruction" type="logic [87:0]">
+  88-bit instruction word containing all control fields
+</ParamField>
+
+## Output signals
+
+### 1-bit control signals (bits 0-4)
+
+| Output | Bit Position | Description |
+|--------|--------------|-------------|
+| `sys_switch_in` | 0 | Switch systolic array weights from shadow to active |
+| `ub_rd_start_in` | 1 | Start unified buffer read operation |
+| `ub_rd_transpose` | 2 | Read matrix in transposed order |
+| `ub_wr_host_valid_in_1` | 3 | Valid signal for host write channel 1 |
+| `ub_wr_host_valid_in_2` | 4 | Valid signal for host write channel 2 |
+
+### 2-bit signals
+
+| Output | Bit Range | Description |
+|--------|-----------|-------------|
+| `ub_rd_col_size` | 6:5 | Number of columns to read (1-2) |
+| `ub_rd_addr_in` | 16:15 | Starting address for unified buffer read |
+
+### 3-bit signal
+
+| Output | Bit Range | Description |
+|--------|-----------|-------------|
+| `ub_ptr_sel` | 19:17 | Unified buffer pointer selector (0-6) |
+
+### 4-bit signal
+
+| Output | Bit Range | Description |
+|--------|-----------|-------------|
+| `vpu_data_pathway` | 55:52 | VPU module enable: `[bias\|leaky_relu\|loss\|leaky_relu_deriv]` |
+
+### 8-bit signal
+
+| Output | Bit Range | Description |
+|--------|-----------|-------------|
+| `ub_rd_row_size` | 14:7 | Number of rows to read from unified buffer |
+
+### 16-bit signals
+
+| Output | Bit Range | Description |
+|--------|-----------|-------------|
+| `ub_wr_host_data_in_1` | 35:20 | Host data for write channel 1 |
+| `ub_wr_host_data_in_2` | 51:36 | Host data for write channel 2 |
+| `inv_batch_size_times_two_in` | 71:56 | Scaling factor for loss computation |
+| `vpu_leak_factor_in` | 87:72 | Leak factor α for leaky ReLU activation |
+
+## Instruction format
+
+The 88-bit instruction word is organized as follows:
+
+```
+Bits    | Width | Field Name
+--------|-------|---------------------------
+0       | 1     | sys_switch_in
+1       | 1     | ub_rd_start_in
+2       | 1     | ub_rd_transpose
+3       | 1     | ub_wr_host_valid_in_1
+4       | 1     | ub_wr_host_valid_in_2
+6:5     | 2     | ub_rd_col_size
+14:7    | 8     | ub_rd_row_size
+16:15   | 2     | ub_rd_addr_in
+19:17   | 3     | ub_ptr_sel
+35:20   | 16    | ub_wr_host_data_in_1
+51:36   | 16    | ub_wr_host_data_in_2
+55:52   | 4     | vpu_data_pathway
+71:56   | 16    | inv_batch_size_times_two_in
+87:72   | 16    | vpu_leak_factor_in
+```
+
+## Implementation
+
+The control unit uses continuous assignments to map instruction bits to outputs:
+
+From ~https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/control_unit.sv:36-69:
+
+```systemverilog
+// 1-bit signals
+assign sys_switch_in = instruction[0];
+assign ub_rd_start_in = instruction[1];
+assign ub_rd_transpose = instruction[2];
+assign ub_wr_host_valid_in_1 = instruction[3];
+assign ub_wr_host_valid_in_2 = instruction[4];
+
+// 2-bit signals
+assign ub_rd_col_size = instruction[6:5];
+assign ub_rd_addr_in = instruction[16:15];
+
+// 3-bit signal
+assign ub_ptr_sel = instruction[19:17];
+
+// 8-bit signal
+assign ub_rd_row_size = instruction[14:7];
+
+// 16-bit signals
+assign ub_wr_host_data_in_1 = instruction[35:20];
+assign ub_wr_host_data_in_2 = instruction[51:36];
+assign vpu_data_pathway = instruction[55:52];
+assign inv_batch_size_times_two_in = instruction[71:56];
+assign vpu_leak_factor_in = instruction[87:72];
+```
+
+## Combinational logic
+
+The control unit contains **no sequential logic** - all outputs are combinational functions of the instruction input. This means:
+
+- Zero clock cycle latency
+- No state is stored
+- Outputs change immediately when instruction changes
+
+## Example instruction encoding
+
+### Forward pass setup
+
+```systemverilog
+logic [87:0] instruction;
+
+// Start read, pointer=0 (input), 2x2 matrix, no transpose
+instruction[1] = 1'b1;      // ub_rd_start_in
+instruction[2] = 1'b0;      // ub_rd_transpose
+instruction[6:5] = 2'd2;    // ub_rd_col_size = 2
+instruction[14:7] = 8'd2;   // ub_rd_row_size = 2
+instruction[19:17] = 3'd0;  // ub_ptr_sel = 0 (input)
+instruction[55:52] = 4'b1100; // vpu_data_pathway = bias + leaky_relu
+```
+
+### Weight loading
+
+```systemverilog
+// Load weights into unified buffer
+instruction[3] = 1'b1;           // ub_wr_host_valid_in_1
+instruction[4] = 1'b1;           // ub_wr_host_valid_in_2
+instruction[35:20] = 16'h0100;   // ub_wr_host_data_in_1 = 1.0 (Q8.8)
+instruction[51:36] = 16'h0080;   // ub_wr_host_data_in_2 = 0.5 (Q8.8)
+```
+
+### Weight switching
+
+```systemverilog
+// Switch weights from shadow to active in systolic array
+instruction[0] = 1'b1;      // sys_switch_in
+```
+
+## Design rationale
+
+The control unit provides several benefits:
+
+1. **Abstraction**: Hides bit-level instruction encoding from higher-level modules
+2. **Flexibility**: Instruction format can be modified by changing only this module
+3. **Clarity**: Named signals are more readable than bit indices
+4. **Reusability**: Instruction format is documented in one place
+
+## Integration with TPU
+
+In a complete system, the control unit would receive instructions from:
+
+- Instruction memory (for programmed sequences)
+- Host controller (for interactive control)
+- Microsequencer (for repeated patterns)
+
+Currently, the Tiny TPU design does not include the control unit in the top-level TPU module, but it demonstrates the intended instruction format for future integration.
+
+## Related modules
+
+- [TPU](/modules/tpu) - Receives decoded control signals
+- [Unified Buffer](/modules/unified-buffer) - Controlled by read/write signals
+- [Systolic Array](/modules/systolic) - Controlled by switch signal
+- [VPU](/modules/vpu) - Controlled by pathway selection
+
+## Testing
+
+The control unit can be tested by:
+
+1. Encoding known instruction patterns
+2. Verifying correct signal decoding
+3. Checking all bit positions are correctly mapped
+4. Ensuring no unassigned bits
+
+Example test:
+
+```systemverilog
+control_unit cu_inst(.instruction(88'hABCDEF0123456789ABCDEF));
+assert(cu_inst.sys_switch_in == instruction[0]);
+assert(cu_inst.ub_rd_start_in == instruction[1]);
+// ... verify all outputs
+```

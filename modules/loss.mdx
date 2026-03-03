@@ -1,0 +1,219 @@
+---
+title: Loss module
+description: Compute MSE loss gradient for backpropagation in the VPU
+---
+
+The loss module computes the gradient of the mean squared error (MSE) loss function with respect to the network's output. This gradient serves as the starting point for backpropagation through the neural network layers.
+
+## Architecture
+
+The loss module follows a parent-child structure:
+
+- **loss_parent**: Top-level module instantiating two loss_child modules
+- **loss_child**: Individual processing unit computing gradient for one output column
+
+This design processes two gradient values in parallel, matching the VPU's dual-column architecture.
+
+## Module ports
+
+### loss_parent
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="H_1_in" type="input logic signed [15:0]">
+  Network output (prediction) for column 1
+</ParamField>
+
+<ParamField path="H_2_in" type="input logic signed [15:0]">
+  Network output (prediction) for column 2
+</ParamField>
+
+<ParamField path="Y_1_in" type="input logic signed [15:0]">
+  Target value (ground truth) for column 1 from unified buffer
+</ParamField>
+
+<ParamField path="Y_2_in" type="input logic signed [15:0]">
+  Target value (ground truth) for column 2 from unified buffer
+</ParamField>
+
+<ParamField path="valid_1_in" type="input logic">
+  Valid signal for column 1 inputs
+</ParamField>
+
+<ParamField path="valid_2_in" type="input logic">
+  Valid signal for column 2 inputs
+</ParamField>
+
+<ParamField path="inv_batch_size_times_two_in" type="input logic signed [15:0]">
+  Precomputed scaling factor (2/N) as fixed-point value from unified buffer
+</ParamField>
+
+<ParamField path="gradient_1_out" type="output logic signed [15:0]">
+  Computed gradient for column 1
+</ParamField>
+
+<ParamField path="gradient_2_out" type="output logic signed [15:0]">
+  Computed gradient for column 2
+</ParamField>
+
+<ParamField path="valid_1_out" type="output logic">
+  Valid signal for column 1 output
+</ParamField>
+
+<ParamField path="valid_2_out" type="output logic">
+  Valid signal for column 2 output
+</ParamField>
+
+### loss_child
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="H_in" type="input logic signed [15:0]">
+  Network output (prediction)
+</ParamField>
+
+<ParamField path="Y_in" type="input logic signed [15:0]">
+  Target value (ground truth)
+</ParamField>
+
+<ParamField path="valid_in" type="input logic">
+  Input valid signal
+</ParamField>
+
+<ParamField path="inv_batch_size_times_two_in" type="input logic signed [15:0]">
+  Scaling factor (2/N) as fixed-point value
+</ParamField>
+
+<ParamField path="gradient_out" type="output logic signed [15:0]">
+  Computed gradient
+</ParamField>
+
+<ParamField path="valid_out" type="output logic">
+  Output valid signal
+</ParamField>
+
+## Loss function
+
+The mean squared error loss is defined as:
+
+```
+MSE = (1/N) Σ(H - Y)²
+```
+
+Where:
+- **N** is the batch size
+- **H** is the network output (prediction)
+- **Y** is the target value
+
+The derivative with respect to the output is:
+
+```
+∂MSE/∂H = (2/N)(H - Y)
+```
+
+This gradient is what the loss module computes.
+
+## Operation
+
+The loss_child module implements a two-stage pipeline for MSE gradient computation:
+
+### Pipeline stages
+
+1. **Stage 1 - Difference computation**: 
+   - Compute `diff = H - Y` using `fxp_addsub` with subtraction mode
+   - This represents the prediction error
+   
+2. **Stage 2 - Scaling**:
+   - Multiply difference by `2/N` using `fxp_mul`
+   - Results in final gradient: `gradient = (2/N) × (H - Y)`
+
+3. **Registered output**:
+   - On clock edge, register the gradient and propagate valid signal
+
+### Fixed-point arithmetic
+
+The module uses 16-bit signed fixed-point (Q8.8 format) for all operations:
+
+- **Subtraction**: `fxp_addsub` with `sub=1` computes `H - Y`
+  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:186` for implementation
+  - Handles sign extension and overflow detection
+
+- **Multiplication**: `fxp_mul` scales the difference by `2/N`
+  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278` for implementation
+  - Properly positions binary point after multiplication
+
+### Precomputed scaling factor
+
+The factor `2/N` is:
+- Precomputed by the host and stored in unified buffer
+- Represented as fixed-point (e.g., for N=4, 2/N = 0.5 = 0x0080 in Q8.8)
+- Shared across all gradient computations in the batch
+- Avoids expensive division operations in hardware
+
+## Integration with VPU
+
+The loss module is active only during the transition pathway:
+
+- **Pathway 1111** (transition): `systolic → bias → leaky_relu → loss → leaky_relu_derivative → output`
+
+When `vpu_data_pathway[1]` is set to 1:
+- Leaky ReLU outputs (H matrix) route to loss module H inputs
+- Target values (Y) provided from unified buffer
+- Scaling factor (2/N) provided from unified buffer
+- Loss gradients route to leaky ReLU derivative module
+- H values are simultaneously cached for use in backward pass
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:268-302` for the loss routing logic.
+
+## Data flow
+
+```
+Leaky ReLU Output (H)
+         |
+         +---> Cache (for backward pass)
+         |
+         v
+[loss_child] <-- Target Y from UB
+      |        <-- Scaling 2/N from UB
+      v
+  Gradient ∂L/∂H
+      |
+      v
+Leaky ReLU Derivative
+```
+
+## Implementation details
+
+- **Latency**: 1 clock cycle (pipelined combinational logic with registered output)
+- **Throughput**: 2 gradients per cycle
+- **Overflow handling**: Both subtraction and multiplication detect overflow
+- **Reset behavior**: Gradient output and valid signals cleared to zero
+- **Valid signal propagation**: Input valid signal is registered and becomes output valid signal
+
+## Transition phase operation
+
+The loss module is critical during the transition between forward and backward passes:
+
+1. **Final forward layer**: Produces output H (predictions)
+2. **Loss computation**: Computes gradients comparing H to targets Y
+3. **Backward pass start**: Gradients seed the backpropagation process
+4. **H caching**: Output layer activations are cached for computing activation derivatives
+
+This transition occurs once per training batch at the output layer of the network.
+
+## Source files
+
+- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_parent.sv`
+- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_child.sv`

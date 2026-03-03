@@ -1,0 +1,213 @@
+---
+title: Gradient descent module
+description: Update weights and biases using gradient descent optimization
+---
+
+The gradient descent module implements the weight and bias update step of the training process. It applies the gradient descent optimization algorithm to adjust network parameters based on computed gradients, enabling the network to learn from training data.
+
+## Module ports
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="lr_in" type="input logic [15:0]">
+  Learning rate (η) as 16-bit fixed-point value
+</ParamField>
+
+<ParamField path="value_old_in" type="input logic [15:0]">
+  Current parameter value (weight or bias) before update
+</ParamField>
+
+<ParamField path="grad_in" type="input logic [15:0]">
+  Computed gradient for this parameter
+</ParamField>
+
+<ParamField path="grad_descent_valid_in" type="input logic">
+  Start signal indicating valid gradient and parameter inputs
+</ParamField>
+
+<ParamField path="grad_bias_or_weight" type="input logic">
+  Parameter type selector: 0 = weight, 1 = bias
+</ParamField>
+
+<ParamField path="value_updated_out" type="output logic [15:0]">
+  Updated parameter value after gradient descent step
+</ParamField>
+
+<ParamField path="grad_descent_done_out" type="output logic">
+  Completion signal indicating update is finished
+</ParamField>
+
+## Gradient descent algorithm
+
+The module implements the standard gradient descent update rule:
+
+```
+θ_new = θ_old - η × ∇L
+```
+
+Where:
+- **θ** represents a parameter (weight or bias)
+- **η** is the learning rate
+- **∇L** is the gradient of the loss with respect to the parameter
+- The negative sign indicates moving opposite to the gradient (downhill)
+
+## Operation
+
+### Update process
+
+1. **Gradient scaling**: Multiply gradient by learning rate using `fxp_mul`
+   - Computes: `scaled_gradient = grad × lr`
+   - Uses fixed-point multiplication to preserve precision
+
+2. **Parameter update**: Subtract scaled gradient from old value using `fxp_addsub`
+   - Computes: `value_new = value_old - scaled_gradient`
+   - Subtraction mode (`sub=1`) implements the negative gradient direction
+
+3. **Output registration**: On clock edge, register updated value and assert done signal
+
+### Pipeline stages
+
+1. **Combinational computation**:
+   - Multiply: `mul_out = grad × lr`
+   - Subtract: `sub_value_out = sub_in_a - mul_out`
+
+2. **Registered output**:
+   - When `grad_descent_valid_in` is high, latch `value_updated_out = sub_value_out`
+   - Assert `grad_descent_done_out` to signal completion
+
+### Weight vs. bias handling
+
+The module uses different update strategies based on `grad_bias_or_weight`:
+
+#### Weight updates (grad_bias_or_weight = 0)
+
+Weights may require **accumulated updates**:
+- If `grad_descent_done_out` is already asserted, use `value_updated_out` as the base
+- Otherwise, use `value_old_in` as the base
+- This allows multiple gradient contributions to be accumulated
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:50-55` for the implementation.
+
+#### Bias updates (grad_bias_or_weight = 1)
+
+Biases use **simple updates**:
+- Always use `value_old_in` as the base
+- Each update is independent
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:58-60`.
+
+### Fixed-point arithmetic
+
+The module uses 16-bit fixed-point representation (Q8.8 format):
+
+- **Multiplication** (`fxp_mul`):
+  - Computes `grad × lr` with proper binary point handling
+  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:33-38`
+  - Implementation at `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278`
+
+- **Subtraction** (`fxp_addsub`):
+  - Computes `value - (grad × lr)` with `sub=1` mode
+  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:40-46`
+  - Implementation at `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:186`
+
+Both operations include overflow detection (though overflow signals are not currently used).
+
+## Control flow
+
+The module uses combinational and sequential logic:
+
+### Combinational logic
+
+- **Multiplexer** for selecting subtraction input based on parameter type
+- **Fixed-point arithmetic** units (multiply and subtract)
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:48-62`.
+
+### Sequential logic
+
+- **Done signal** registered from valid input signal
+- **Updated value** registered when valid input is high
+- **Reset behavior** clears all outputs to zero
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:64-77`.
+
+## Integration with system
+
+The gradient descent module operates outside the main VPU pipeline:
+
+### Typical usage flow
+
+1. **Gradient computation**: VPU computes gradients for all parameters
+2. **Gradient accumulation**: Gradients may be summed across batch (external to this module)
+3. **Parameter update**: For each parameter:
+   - Load old value from unified buffer
+   - Load corresponding gradient
+   - Assert `grad_descent_valid_in`
+   - Wait for `grad_descent_done_out`
+   - Write updated value back to unified buffer
+4. **Iteration**: Repeat for all weights and biases in the network
+
+### Learning rate
+
+The learning rate is:
+- Set by the host system based on training hyperparameters
+- Represented as fixed-point (e.g., η=0.01 = 0x0028 in Q8.8)
+- Typically remains constant during training (though can be adjusted for learning rate schedules)
+- Shared across all parameter updates in an epoch
+
+## Implementation details
+
+- **Latency**: 1 clock cycle (combinational arithmetic + registered output)
+- **Throughput**: 1 parameter update per cycle
+- **Parallelism**: Module can be instantiated multiple times for concurrent updates
+- **Reset behavior**: All outputs cleared to zero
+- **Done signal timing**: Asserted one cycle after valid input
+
+## Example update
+
+Consider updating a weight:
+
+- Old weight: `w_old = 0.5` (0x0080 in Q8.8)
+- Gradient: `∂L/∂w = 0.2` (0x0033 in Q8.8)  
+- Learning rate: `η = 0.1` (0x0019 in Q8.8)
+
+The module computes:
+
+1. **Scale gradient**: `0.2 × 0.1 = 0.02` (0x0005 in Q8.8)
+2. **Update weight**: `0.5 - 0.02 = 0.48` (0x007A in Q8.8)
+3. **Output**: `w_new = 0.48`
+
+The weight has moved in the direction that reduces loss.
+
+## Training loop integration
+
+The gradient descent module is used during the **parameter update phase** of each training iteration:
+
+1. **Forward pass**: Compute predictions (VPU forward pathway)
+2. **Loss computation**: Compare predictions to targets (VPU transition pathway)
+3. **Backward pass**: Compute gradients (VPU backward pathway + systolic array)
+4. **Parameter update**: Apply gradient descent (this module)
+5. **Repeat**: Next training iteration with updated parameters
+
+## Optimization considerations
+
+### Current implementation
+- Basic gradient descent (no momentum, no adaptive learning rates)
+- Single parameter updated per cycle
+- Simple accumulation logic for weight updates
+
+### Potential enhancements
+- **Momentum**: Add velocity term to smooth updates
+- **Adaptive learning rates**: Per-parameter learning rate adjustment (Adam, RMSprop)
+- **Parallelization**: Multiple gradient descent modules for faster updates
+- **Learning rate decay**: Automatic reduction over time
+
+## Source files
+
+- Module implementation: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv`

@@ -1,0 +1,255 @@
+---
+title: Processing element
+description: Detailed architecture of the PE multiply-accumulate unit
+---
+
+The processing element (PE) is the fundamental computational unit in the Tiny TPU. Each PE performs one multiply-accumulate (MAC) operation per clock cycle, multiplying an input value by a stored weight and adding it to a partial sum.
+
+## Module interface
+
+```systemverilog
+module pe #(
+    parameter int DATA_WIDTH = 16
+) (
+    input logic clk,
+    input logic rst,
+
+    // North inputs (from PE above or top of array)
+    input logic signed [15:0] pe_psum_in,
+    input logic signed [15:0] pe_weight_in,
+    input logic pe_accept_w_in,
+    
+    // West inputs (from PE to the left or left edge)
+    input logic signed [15:0] pe_input_in,
+    input logic pe_valid_in,
+    input logic pe_switch_in,
+    input logic pe_enabled,
+
+    // South outputs (to PE below or bottom of array)
+    output logic signed [15:0] pe_psum_out,
+    output logic signed [15:0] pe_weight_out,
+
+    // East outputs (to PE to the right or right edge)
+    output logic signed [15:0] pe_input_out,
+    output logic pe_valid_out,
+    output logic pe_switch_out
+);
+```
+
+Source: [pe.sv:4-29](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L4-L29)
+
+## Computational core
+
+### Multiply-accumulate operation
+
+The PE performs the fundamental MAC operation every clock cycle:
+
+```
+pe_psum_out = (pe_input_in × weight_reg_active) + pe_psum_in
+```
+
+This operation is implemented using two fixed-point modules:
+
+```systemverilog
+logic signed [15:0] mult_out;
+wire signed [15:0] mac_out;
+
+fxp_mul mult (
+    .ina(pe_input_in),
+    .inb(weight_reg_active),
+    .out(mult_out),
+    .overflow()
+);
+
+fxp_add adder (
+    .ina(mult_out),
+    .inb(pe_psum_in),
+    .out(mac_out),
+    .overflow()
+);
+```
+
+Source: [pe.sv:36-48](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L36-L48)
+
+<Note>
+The fixed-point multiplier and adder operate combinationally within the same clock cycle, with the result registered on the next clock edge.
+</Note>
+
+## Weight storage
+
+### Dual-register design
+
+Each PE contains two weight registers to support weight preloading:
+
+- **Active register** (`weight_reg_active`): Used in MAC operations
+- **Inactive register** (`weight_reg_inactive`): Receives new weights in the background
+
+```systemverilog
+logic signed [15:0] weight_reg_active;    // foreground register
+logic signed [15:0] weight_reg_inactive;  // background register
+```
+
+Source: [pe.sv:33-34](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L33-L34)
+
+### Weight loading mechanism
+
+Weights are loaded in two phases:
+
+1. **Preload phase**: Weights flow through the array when `pe_accept_w_in` is high
+   ```systemverilog
+   if (pe_accept_w_in) begin
+       weight_reg_inactive <= pe_weight_in;
+       pe_weight_out <= pe_weight_in;
+   end
+   ```
+
+2. **Switch phase**: When `pe_switch_in` goes high, inactive weights become active
+   ```systemverilog
+   always_comb begin
+       if (pe_switch_in) begin
+           weight_reg_active = weight_reg_inactive;
+       end
+   end
+   ```
+
+Source: [pe.sv:52-56](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L52-L56), [pe.sv:71-76](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L71-L76)
+
+<Tip>
+This dual-register design allows new weights to be preloaded while the PE continues computing with the current weights, minimizing computation stalls.
+</Tip>
+
+## Data flow directions
+
+The PE has four directional interfaces corresponding to compass directions:
+
+### North (input)
+- **Partial sums** flow down from the PE above
+- **Weights** propagate down during preload phase
+- **Accept signal** enables weight reception
+
+### West (input)
+- **Input activations** flow right across the array
+- **Valid signal** indicates valid data
+- **Switch signal** triggers weight activation
+- **Enable signal** controls PE operation
+
+### South (output)
+- **Computed partial sums** flow down to the next PE
+- **Weights** continue propagating during preload
+
+### East (output)
+- **Input activations** continue flowing right
+- **Valid signal** propagates with data
+- **Switch signal** propagates diagonally
+
+## Control signals
+
+### pe_enabled
+
+Controls whether the PE participates in computation:
+- Used to disable columns when matrix width < array width
+- Set based on `ub_rd_col_size` from the unified buffer
+
+```systemverilog
+if (rst || !pe_enabled) begin
+    pe_input_out <= 16'b0;
+    weight_reg_active <= 16'b0;
+    weight_reg_inactive <= 16'b0;
+    pe_valid_out <= 0;
+    pe_weight_out <= 16'b0;
+    pe_switch_out <= 0;
+end
+```
+
+Source: [pe.sv:59-65](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L59-L65)
+
+### pe_valid_in
+
+Indicates when input data is valid:
+- Only perform MAC when `pe_valid_in` is high
+- Gates the output partial sum and propagated input
+
+```systemverilog
+if (pe_valid_in) begin
+    pe_input_out <= pe_input_in;
+    pe_psum_out <= mac_out;
+end else begin
+    pe_valid_out <= 0;
+    pe_psum_out <= 16'b0;
+end
+```
+
+Source: [pe.sv:78-84](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/pe.sv#L78-L84)
+
+### pe_switch_in
+
+Triggers the weight register swap:
+- Combinational logic for same-cycle activation
+- Allows inputs to load on the same cycle as switch
+- Propagates diagonally through the array (top-left to bottom-right)
+
+<Warning>
+The `pe_switch_in` signal uses combinational logic rather than sequential logic. This means the weight register swap happens immediately, allowing inputs from the left side to load on the same clock cycle that the switch flag is set.
+</Warning>
+
+## Pipeline behavior
+
+The PE operates with a one-cycle latency:
+
+1. **Cycle N**: Inputs arrive at PE
+   - `pe_input_in` contains activation value
+   - `pe_psum_in` contains partial sum from above
+   - `pe_valid_in` indicates valid data
+
+2. **Cycle N** (combinational): MAC operation occurs
+   - Multiplication: `pe_input_in × weight_reg_active`
+   - Addition: `mult_out + pe_psum_in`
+   - Result available at `mac_out`
+
+3. **Cycle N+1**: Outputs registered
+   - `pe_psum_out` ← `mac_out`
+   - `pe_input_out` ← `pe_input_in`
+   - `pe_valid_out` ← `pe_valid_in`
+
+## Fixed-point arithmetic
+
+All PE arithmetic uses Q8.8 fixed-point format:
+- Sign bit: 1 bit
+- Integer part: 7 bits
+- Fractional part: 8 bits
+
+The `fxp_mul` and `fxp_add` modules handle:
+- Proper bit alignment
+- Overflow detection (unused in current design)
+- Rounding to maintain precision
+
+See the [fixed-point library](https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv) for implementation details.
+
+## Usage example
+
+In a 2×2 systolic array computing matrix multiplication C = A × B:
+
+1. **Setup**: Load weights (B matrix values) into inactive registers
+2. **Activate**: Assert `pe_switch_in` to activate weights
+3. **Compute**: Stream A matrix values horizontally
+   - Each PE multiplies its input by its weight
+   - Partial sums accumulate vertically
+4. **Output**: Final sums emerge from bottom of array
+
+```
+Time 0: Load weights
+Time 1: Switch to activate weights
+Time 2: First input enters PE(1,1)
+Time 3: PE(1,1) computes, input reaches PE(1,2)
+Time 4: Results propagate down
+...
+```
+
+## Reset behavior
+
+On reset (`rst` = 1), all registers clear:
+- Both weight registers → 16'b0
+- All outputs → 0
+- Valid signals → 0
+
+This ensures clean startup and allows reset during operation if needed.

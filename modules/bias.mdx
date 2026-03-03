@@ -1,0 +1,161 @@
+---
+title: Bias module
+description: Add bias values to systolic array outputs in the VPU pipeline
+---
+
+The bias module adds learned bias terms to matrix multiplication results from the systolic array. It operates as part of the VPU's forward pass pathway, implementing the bias addition step in neural network layer computation.
+
+## Architecture
+
+The bias module consists of a parent-child hierarchy:
+
+- **bias_parent**: Top-level module instantiating two bias_child modules for parallel column processing
+- **bias_child**: Individual processing unit handling bias addition for one feature column
+
+Each bias_child processes one column of the output matrix, allowing the VPU to handle two columns in parallel (matching the 2x2 systolic array configuration).
+
+## Module ports
+
+### bias_parent
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="bias_scalar_in_1" type="input logic signed [15:0]">
+  Bias scalar for column 1, fetched from unified buffer
+</ParamField>
+
+<ParamField path="bias_scalar_in_2" type="input logic signed [15:0]">
+  Bias scalar for column 2, fetched from unified buffer
+</ParamField>
+
+<ParamField path="bias_sys_data_in_1" type="input wire signed [15:0]">
+  Data input from systolic array for column 1
+</ParamField>
+
+<ParamField path="bias_sys_data_in_2" type="input wire signed [15:0]">
+  Data input from systolic array for column 2
+</ParamField>
+
+<ParamField path="bias_sys_valid_in_1" type="input wire">
+  Valid signal for column 1 data from systolic array
+</ParamField>
+
+<ParamField path="bias_sys_valid_in_2" type="input wire">
+  Valid signal for column 2 data from systolic array
+</ParamField>
+
+<ParamField path="bias_z_data_out_1" type="output logic signed [15:0]">
+  Pre-activation output (Z) for column 1
+</ParamField>
+
+<ParamField path="bias_z_data_out_2" type="output logic signed [15:0]">
+  Pre-activation output (Z) for column 2
+</ParamField>
+
+<ParamField path="bias_Z_valid_out_1" type="output logic">
+  Valid signal for column 1 output
+</ParamField>
+
+<ParamField path="bias_Z_valid_out_2" type="output logic">
+  Valid signal for column 2 output
+</ParamField>
+
+### bias_child
+
+<ParamField path="clk" type="input logic">
+  System clock signal
+</ParamField>
+
+<ParamField path="rst" type="input logic">
+  Active-high reset signal
+</ParamField>
+
+<ParamField path="bias_scalar_in" type="input logic signed [15:0]">
+  Bias scalar value from unified buffer
+</ParamField>
+
+<ParamField path="bias_sys_data_in" type="input wire signed [15:0]">
+  Data from systolic array
+</ParamField>
+
+<ParamField path="bias_sys_valid_in" type="input wire">
+  Valid signal from systolic array
+</ParamField>
+
+<ParamField path="bias_z_data_out" type="output logic signed [15:0]">
+  Pre-activation output after bias addition
+</ParamField>
+
+<ParamField path="bias_Z_valid_out" type="output logic">
+  Output valid signal
+</ParamField>
+
+## Operation
+
+The bias module performs fixed-point addition: **Z = X·W + b**
+
+Where:
+- **X·W** is the matrix multiplication result from the systolic array
+- **b** is the bias term stored in the unified buffer
+- **Z** is the pre-activation output
+
+### Pipeline stages
+
+1. **Combinational addition**: The `fxp_add` module performs fixed-point addition of systolic array output and bias scalar
+2. **Registered output**: On the next clock cycle, if the input valid signal is high, the result is registered and the output valid signal is asserted
+
+### Fixed-point arithmetic
+
+The bias module uses 16-bit signed fixed-point representation (Q8.8 format: 8 integer bits, 8 fractional bits). The `fxp_add` module handles:
+- Proper alignment of binary points
+- Overflow detection
+- Rounding according to configured parameters
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:110` for the `fxp_add` implementation.
+
+## Integration with VPU
+
+The bias module is activated during the VPU's forward pass pathway. The VPU data pathway control bits determine routing:
+
+- **Pathway 1100** (forward pass): `systolic → bias → leaky_relu → output`
+- **Pathway 1111** (transition): `systolic → bias → leaky_relu → loss → leaky_relu_derivative → output`
+
+When `vpu_data_pathway[3]` is set to 1, the VPU routes:
+- Systolic array outputs to bias module inputs
+- Bias scalars from unified buffer to bias module
+- Bias module outputs to the next stage (leaky ReLU)
+
+See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:213-224` for the bias routing logic.
+
+## Data flow
+
+```
+Unified Buffer (bias scalars)
+         |
+         v
+[bias_child] <-- Systolic Array
+         |
+         v
+   Pre-activation Z
+         |
+         v
+  Leaky ReLU Module
+```
+
+## Implementation details
+
+- **Latency**: 1 clock cycle (registered output)
+- **Throughput**: 2 values per cycle (dual column processing)
+- **Bias update frequency**: Bias values remain constant for an entire layer and are updated only between layers
+- **Reset behavior**: On reset, output data and valid signals are cleared to zero
+
+## Source files
+
+- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_parent.sv`
+- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_child.sv`

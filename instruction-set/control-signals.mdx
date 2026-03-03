@@ -1,0 +1,200 @@
+---
+title: Control signal reference
+description: Complete documentation of all control signals in the Tiny TPU instruction format
+---
+
+This page documents every control signal in the 88-bit instruction format, organized by functional group.
+
+## System control signals
+
+Bits `[0:4]` contain five 1-bit control flags:
+
+<ParamField path="sys_switch_in" type="bit" default="0">
+  System mode switch - controls whether the TPU is actively processing
+  
+  - `1` = System active, computation in progress
+  - `0` = System idle
+  
+  **Bit position**: `[0]`
+</ParamField>
+
+<ParamField path="ub_rd_start_in" type="bit" default="0">
+  Unified Buffer read transaction trigger
+  
+  - `1` = Start a new read transaction
+  - `0` = No read initiated
+  
+  **Bit position**: `[1]`
+</ParamField>
+
+<ParamField path="ub_rd_transpose" type="bit" default="0">
+  Unified Buffer read transpose mode
+  
+  - `1` = Transpose data during read (for loading transposed weight matrices)
+  - `0` = Normal read without transpose
+  
+  **Bit position**: `[2]`
+</ParamField>
+
+<ParamField path="ub_wr_host_valid_in_1" type="bit" default="0">
+  Host write channel 1 valid flag
+  
+  - `1` = Data on channel 1 is valid, write to UB
+  - `0` = No valid data on channel 1
+  
+  **Bit position**: `[3]`
+</ParamField>
+
+<ParamField path="ub_wr_host_valid_in_2" type="bit" default="0">
+  Host write channel 2 valid flag
+  
+  - `1` = Data on channel 2 is valid, write to UB
+  - `0` = No valid data on channel 2
+  
+  **Bit position**: `[4]`
+</ParamField>
+
+## Unified Buffer read control
+
+These fields control data reads from the Unified Buffer:
+
+<ParamField path="ub_rd_col_size" type="2-bit" default="0">
+  Number of columns to read from UB
+  
+  | Value | Columns |
+  |-------|--------|
+  | `00` | 0 |
+  | `01` | 1 |
+  | `10` | 2 |
+  | `11` | 3 |
+  
+  **Bit position**: `[6:5]`
+</ParamField>
+
+<ParamField path="ub_rd_row_size" type="8-bit" default="0">
+  Number of rows to read from UB (0-255)
+  
+  Specifies how many rows of data to read in the current transaction.
+  
+  **Examples**:
+  - `0x08` = Read 8 rows
+  - `0x04` = Read 4 rows (batch size)
+  - `0x01` = Read 1 row
+  
+  **Bit position**: `[14:7]`
+</ParamField>
+
+<ParamField path="ub_rd_addr_in" type="2-bit" default="0">
+  Unified Buffer read address pointer
+  
+  Selects the starting address in UB for the read transaction.
+  
+  <Note>
+  The actual implementation uses 2 bits `[16:15]`, providing 4 possible addresses. The README documentation shows 8 bits `[22:15]`, which is a discrepancy with the hardware.
+  </Note>
+  
+  **Bit position**: `[16:15]`
+</ParamField>
+
+<ParamField path="ub_ptr_sel" type="3-bit" default="0">
+  Unified Buffer pointer select - routes UB read data to different modules
+  
+  | Value | Destination |
+  |-------|------------|
+  | `000` | Systolic array (left input) |
+  | `001` | Systolic array (top input/weights) |
+  | `010` | VPU bias module |
+  | `011` | VPU loss module |
+  | `100` | VPU activation derivative module |
+  | `101` | VPU gradient descent (bias) |
+  | `110` | VPU gradient descent (weights) |
+  
+  **Example**: `3'b001 = route read pointer to weight inputs of systolic array`
+  
+  **Bit position**: `[19:17]`
+</ParamField>
+
+## Host write data
+
+The TPU provides two write channels for loading data into the Unified Buffer:
+
+<ParamField path="ub_wr_host_data_in_1" type="16-bit fixed-point" default="0">
+  First host write data word
+  
+  Fixed-point format: Q8.8 (8 integer bits, 8 fractional bits)
+  
+  **Example**: `0xABCD` writes the value represented by this fixed-point encoding
+  
+  **Bit position**: `[35:20]`
+</ParamField>
+
+<ParamField path="ub_wr_host_data_in_2" type="16-bit fixed-point" default="0">
+  Second host write data word
+  
+  Fixed-point format: Q8.8 (8 integer bits, 8 fractional bits)
+  
+  Enables writing two values per instruction cycle for faster data loading.
+  
+  **Example**: `0x1234`
+  
+  **Bit position**: `[51:36]`
+</ParamField>
+
+## Vector Processing Unit control
+
+<ParamField path="vpu_data_pathway" type="4-bit" default="0">
+  VPU pipeline configuration - selects which modules are active
+  
+  | Value | Configuration | Use case |
+  |-------|--------------|----------|
+  | `0000` | Bypass | Gradient calculation |
+  | `0001` | Activation derivative only | Backpropagation |
+  | `1100` | Bias + Activation | Forward pass layer 1 |
+  | `1111` | Bias + Activation + Loss | Forward pass final layer |
+  
+  See [VPU data pathways](/instruction-set/data-pathways) for complete routing details.
+  
+  **Bit position**: `[55:52]`
+</ParamField>
+
+<ParamField path="inv_batch_size_times_two_in" type="16-bit fixed-point" default="0">
+  Precomputed scaling factor for MSE loss backpropagation
+  
+  Fixed-point format: Q8.8
+  
+  **Calculation**: `2 / batch_size`
+  
+  **Examples**:
+  - Batch size 4: `0x0080` (2/4 = 0.5 in Q8.8)
+  - Batch size 32: `0x0010` (2/32 = 0.0625 in Q8.8)
+  
+  **Bit position**: `[71:56]`
+</ParamField>
+
+<ParamField path="vpu_leak_factor_in" type="16-bit fixed-point" default="0">
+  Leak factor for Leaky ReLU activation function
+  
+  Fixed-point format: Q8.8
+  
+  **Common values**:
+  - `0x0080` = 0.5 (typical for Leaky ReLU)
+  - `0x0019` = 0.1 (common alternative)
+  - `0x0000` = 0.0 (standard ReLU)
+  
+  **Example**: `0x00A0 = 0.625` (160/256 in Q8.8)
+  
+  **Bit position**: `[87:72]`
+</ParamField>
+
+## Signal timing
+
+Control signals follow these timing conventions:
+
+- **Start signals** (`ub_rd_start_in`): Assert for one cycle to initiate operation
+- **Valid signals** (`ub_wr_host_valid_in_*`): Hold high while data is valid
+- **Mode signals** (`ub_rd_transpose`, `sys_switch_in`): Set before starting operation
+- **Data signals**: Must be stable when corresponding valid signal is high
+
+<Tip>
+In the test sequences, start signals are typically asserted for one cycle, then cleared while the operation completes.
+</Tip>
