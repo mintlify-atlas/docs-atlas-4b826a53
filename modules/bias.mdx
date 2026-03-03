@@ -117,7 +117,7 @@ The bias module uses 16-bit signed fixed-point representation (Q8.8 format: 8 in
 - Overflow detection
 - Rounding according to configured parameters
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:110` for the `fxp_add` implementation.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:110` for the `fxp_add` implementation.
 
 ## Integration with VPU
 
@@ -131,7 +131,7 @@ When `vpu_data_pathway[3]` is set to 1, the VPU routes:
 - Bias scalars from unified buffer to bias module
 - Bias module outputs to the next stage (leaky ReLU)
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:213-224` for the bias routing logic.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:213-224` for the bias routing logic.
 
 ## Data flow
 
@@ -157,5 +157,5 @@ Unified Buffer (bias scalars)
 
 ## Source files
 
-- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_parent.sv`
-- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_child.sv`
+- Parent module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_parent.sv`
+- Child module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/bias_child.sv`

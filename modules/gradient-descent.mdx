@@ -92,7 +92,7 @@ Weights may require **accumulated updates**:
 - Otherwise, use `value_old_in` as the base
 - This allows multiple gradient contributions to be accumulated
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:50-55` for the implementation.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:50-55` for the implementation.
 
 #### Bias updates (grad_bias_or_weight = 1)
 
@@ -100,7 +100,7 @@ Biases use **simple updates**:
 - Always use `value_old_in` as the base
 - Each update is independent
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:58-60`.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:58-60`.
 
 ### Fixed-point arithmetic
 
@@ -108,13 +108,13 @@ The module uses 16-bit fixed-point representation (Q8.8 format):
 
 - **Multiplication** (`fxp_mul`):
   - Computes `grad × lr` with proper binary point handling
-  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:33-38`
-  - Implementation at `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278`
+  - See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:33-38`
+  - Implementation at `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278`
 
 - **Subtraction** (`fxp_addsub`):
   - Computes `value - (grad × lr)` with `sub=1` mode
-  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:40-46`
-  - Implementation at `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:186`
+  - See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:40-46`
+  - Implementation at `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:186`
 
 Both operations include overflow detection (though overflow signals are not currently used).
 
@@ -127,7 +127,7 @@ The module uses combinational and sequential logic:
 - **Multiplexer** for selecting subtraction input based on parameter type
 - **Fixed-point arithmetic** units (multiply and subtract)
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:48-62`.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:48-62`.
 
 ### Sequential logic
 
@@ -135,7 +135,7 @@ See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient
 - **Updated value** registered when valid input is high
 - **Reset behavior** clears all outputs to zero
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:64-77`.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv:64-77`.
 
 ## Integration with system
 
@@ -210,4 +210,4 @@ The gradient descent module is used during the **parameter update phase** of eac
 
 ## Source files
 
-- Module implementation: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv`
+- Module implementation: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/gradient_descent.sv`

@@ -147,11 +147,11 @@ The loss_child module implements a two-stage pipeline for MSE gradient computati
 The module uses 16-bit signed fixed-point (Q8.8 format) for all operations:
 
 - **Subtraction**: `fxp_addsub` with `sub=1` computes `H - Y`
-  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:186` for implementation
+  - See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:186` for implementation
   - Handles sign extension and overflow detection
 
 - **Multiplication**: `fxp_mul` scales the difference by `2/N`
-  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278` for implementation
+  - See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278` for implementation
   - Properly positions binary point after multiplication
 
 ### Precomputed scaling factor
@@ -175,7 +175,7 @@ When `vpu_data_pathway[1]` is set to 1:
 - Loss gradients route to leaky ReLU derivative module
 - H values are simultaneously cached for use in backward pass
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:268-302` for the loss routing logic.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:268-302` for the loss routing logic.
 
 ## Data flow
 
@@ -215,5 +215,5 @@ This transition occurs once per training batch at the output layer of the networ
 
 ## Source files
 
-- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_parent.sv`
-- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_child.sv`
+- Parent module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_parent.sv`
+- Child module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/loss_child.sv`

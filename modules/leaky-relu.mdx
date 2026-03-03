@@ -120,7 +120,7 @@ The module uses 16-bit signed fixed-point representation (Q8.8 format). For nega
 - Proper handling of binary point positioning
 - Overflow detection and saturation
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278` for the `fxp_mul` implementation.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278` for the `fxp_mul` implementation.
 
 ### Leak factor
 
@@ -143,7 +143,7 @@ When `vpu_data_pathway[2]` is set to 1:
 - Leaky ReLU outputs proceed to next stage or final output
 - Activated values (H matrix) are cached when transitioning to backward pass
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:240-265` for the leaky ReLU routing logic.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:240-265` for the leaky ReLU routing logic.
 
 ## Data flow
 
@@ -181,5 +181,5 @@ Bias Module (Z = X·W + b)
 
 ## Source files
 
-- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_parent.sv`
-- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_child.sv`
+- Parent module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_parent.sv`
+- Child module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_child.sv`

@@ -155,14 +155,14 @@ The module uses the **activated value H** rather than the **pre-activation Z** t
 - H values are cached in the VPU during the transition pathway
 - This avoids needing to cache additional pre-activation values
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_child.sv:31` for the implementation.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_child.sv:31` for the implementation.
 
 ### Fixed-point arithmetic
 
 The module uses 16-bit signed fixed-point (Q8.8 format):
 
 - **Multiplication**: When H < 0, `fxp_mul` computes `gradient × leak_factor`
-  - See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278`
+  - See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/fixedpoint.sv:278`
   - Handles binary point alignment
   - Detects overflow conditions
 
@@ -189,7 +189,7 @@ When `vpu_data_pathway[0]` is set to 1:
 - Leak factor provided from unified buffer
 - Outputs route to final VPU output for further backpropagation
 
-See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:304-328` for the derivative routing logic.
+See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:304-328` for the derivative routing logic.
 
 ## Data flow
 
@@ -222,7 +222,7 @@ Systolic Array (upstream ∂L/∂H)
 The VPU includes special logic for caching H values:
 
 - During **transition pathway (1111)**: H values from leaky ReLU are cached in internal registers
-- Cache update: See `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:282-285`
+- Cache update: See `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/vpu.sv:282-285`
 - Cache usage: Cached values route to derivative module during transition
 - For subsequent backward passes: H values are loaded from unified buffer (pre-stored during forward pass)
 
@@ -249,5 +249,5 @@ The module computes:
 
 ## Source files
 
-- Parent module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_parent.sv`
-- Child module: `/home/daytonahttps://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_child.sv`
+- Parent module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_parent.sv`
+- Child module: `https://github.com/tiny-tpu-v2/tiny-tpu/blob/main/src/leaky_relu_derivative_child.sv`
